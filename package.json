@@ -1,0 +1,17 @@
+{
+  "name": "scrapbook-diary",
+  "version": "1.0.0",
+  "description": "A scrapbook-style diary with draggable photos and notes, and a live CSS style lab.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build:static": "node scripts/build-static.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.1"
+  }
+}

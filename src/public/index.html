@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Scrapbook Diary</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Lora:ital,wght@0,400;0,500;1,400&family=Space+Mono:wght@400;700&display=swap" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div id="app">
+  <nav id="tabs" class="tabs">
+    <button id="tab-diary" class="tab-btn active">Diary</button>
+    <button id="tab-lab" class="tab-btn">Style Lab</button>
+    <span id="save-indicator" class="save-indicator"></span>
+  </nav>
+
+  <section id="view-list" class="view">
+    <div class="list-header">
+      <h1 class="diary-title">Your entries</h1>
+      <button id="new-entry-btn" class="btn btn-accent">+ New entry</button>
+    </div>
+    <div id="entries-empty" class="empty-state" hidden>No entries yet — start your first page.</div>
+    <div id="entries-grid" class="entries-grid"></div>
+  </section>
+
+  <section id="view-entry" class="view" hidden>
+    <div class="entry-toolbar">
+      <button id="back-btn" class="btn">&larr; Entries</button>
+      <input id="entry-title-input" class="entry-title-input diary-title" />
+      <span id="entry-date" class="diary-date"></span>
+      <button id="add-note-btn" class="btn btn-green">+ Note</button>
+      <button id="add-photo-btn" class="btn btn-orange">+ Photo</button>
+      <button id="add-text-btn" class="btn btn-gold">+ Text</button>
+      <button id="add-music-btn" class="btn btn-purple">+ Music</button>
+      <button id="publish-btn" class="btn">Publish</button>
+      <input id="photo-file-input" type="file" accept="image/*" hidden />
+    </div>
+    <div id="canvas-empty" class="canvas-empty" hidden>This page is blank — add a photo or a note to start scrapbooking.</div>
+    <div id="canvas" class="scrapbook-canvas"></div>
+  </section>
+
+  <section id="view-lab" class="view" hidden>
+    <div class="lab-grid">
+      <div class="lab-editor">
+        <label class="lab-label">custom-css.css — restyles every page live</label>
+        <textarea id="css-textarea" class="css-textarea" spellcheck="false" placeholder=".diary-title { color: hotpink; }"></textarea>
+        <div class="preset-row" id="preset-row"></div>
+      </div>
+      <div class="lab-hooks">
+        <div class="lab-label">available hooks</div>
+        <div id="hooks-list" class="hooks-list"></div>
+        <div class="lab-note">This CSS applies live and saves to <code>src/data/style.css</code>.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Published read-only view: no add-item buttons, nothing editable, and
+       (unlike the editor's endless-scroll canvas) sized to fit its content
+       exactly — see renderReadOnlyView / renderReadOnlyCanvas in app.js. -->
+  <section id="view-readonly" class="view" hidden>
+    <div class="readonly-toolbar">
+      <span class="readonly-badge">Preview</span>
+      <h1 id="readonly-title" class="diary-title"></h1>
+      <span id="readonly-date" class="diary-date"></span>
+    </div>
+    <div id="readonly-error" class="empty-state" hidden>This entry couldn't be found.</div>
+    <div id="readonly-canvas" class="scrapbook-canvas"></div>
+  </section>
+</div>
+
+<style id="custom-style"></style>
+<script src="/app.js"></script>
+</body>
+</html>

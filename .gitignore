@@ -1,0 +1,10 @@
+node_modules/
+
+# Local runtime data (entries, uploads, custom CSS) — not source code, and
+# already duplicated into docs/ for whichever entries are published via
+# scripts/build-static.js. Keeping it out of git avoids re-publishing every
+# local entry's photos into git history the moment they're created, even
+# ones never meant to go public.
+src/data/entries/
+src/data/uploads/
+src/data/style.css
