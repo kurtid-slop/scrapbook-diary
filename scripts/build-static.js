@@ -23,6 +23,10 @@ const ENTRIES_DIR = path.join(ROOT, "src", "data", "entries");
 const PUBLIC_DIR = path.join(ROOT, "src", "public");
 const TEMPLATE_DIR = path.join(__dirname, "static-site");
 const OUT_DIR = path.join(ROOT, "docs");
+// Link-preview crawlers (Discord, iMessage, Slack, ...) don't all reliably
+// resolve relative og:image/twitter:image URLs, so those specifically need
+// an absolute URL — this site's fixed, known GitHub Pages address.
+const SITE_BASE_URL = "https://kurtid-design.github.io/scrapbook-diary/";
 
 /**
  * Rewrite a photo item's server-relative URL (/entries/<id>/uploads/<file>)
@@ -35,10 +39,25 @@ function toRelativeUploadPath(url) {
   return `./uploads/${path.basename(url)}`;
 }
 
+/** @param {string} str @returns {string} HTML-escaped for a safe attribute/text value. */
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+const MIME_TYPES = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif" };
+
+/** @param {string} filePath @returns {string} Best-guess image MIME type from its extension. */
+function mimeTypeFor(filePath) {
+  return MIME_TYPES[path.extname(filePath).toLowerCase()] || "image/jpeg";
+}
+
 /**
  * Export one entry folder (src/data/entries/<id>/) into docs/entries/<id>/:
  * copies its uploads, rewrites photo URLs in its JSON, and writes its static
- * page from the entry.html template.
+ * page from the entry.html template — with the entry's own title, and (if
+ * it has a photo) that photo set as both the tab favicon and the page's
+ * Open Graph/Twitter Card image, so a shared link's preview and the browser
+ * tab both show the same "cover photo" the entries list already does.
  * @param {string} id
  * @returns {{id: string, title: string, date: number, itemCount: number, previewUrl: string|null}}
  */
@@ -57,16 +76,38 @@ function exportEntry(id) {
     entry.canvasBgImage = toRelativeUploadPath(entry.canvasBgImage);
   }
 
-  let previewUrl = null;
+  let previewUrl = null; // relative to docs/ root — used by the list page
+  let pagePreviewImg = null; // relative to this entry's own page — used below
   for (const item of entry.items || []) {
     if (item.type === "photo" && item.img) {
       item.img = toRelativeUploadPath(item.img);
-      if (!previewUrl) previewUrl = `entries/${id}/${item.img.slice(2)}`;
+      if (!previewUrl) {
+        previewUrl = `entries/${id}/${item.img.slice(2)}`;
+        pagePreviewImg = item.img;
+      }
     }
   }
 
   fs.writeFileSync(path.join(outDir, "entry.json"), JSON.stringify(entry));
-  fs.copyFileSync(path.join(TEMPLATE_DIR, "entry.html"), path.join(outDir, "index.html"));
+
+  const title = entry.title || "Untitled";
+  const absPreviewUrl = previewUrl ? `${SITE_BASE_URL}${previewUrl}` : null;
+  const headExtras = pagePreviewImg
+    ? `<link rel="icon" href="${pagePreviewImg}" type="${mimeTypeFor(pagePreviewImg)}" />
+<meta property="og:title" content="${escapeHtml(title)}" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="${SITE_BASE_URL}entries/${id}/" />
+<meta property="og:image" content="${absPreviewUrl}" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="${escapeHtml(title)}" />
+<meta name="twitter:image" content="${absPreviewUrl}" />`
+    : `<meta property="og:title" content="${escapeHtml(title)}" />`;
+
+  const html = fs
+    .readFileSync(path.join(TEMPLATE_DIR, "entry.html"), "utf-8")
+    .replace("<title>Scrapbook Diary</title>", `<title>${escapeHtml(title)}</title>`)
+    .replace("<!--HEAD_INJECT-->", headExtras);
+  fs.writeFileSync(path.join(outDir, "index.html"), html);
 
   return {
     id,
