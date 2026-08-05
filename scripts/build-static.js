@@ -53,6 +53,10 @@ function exportEntry(id) {
     fs.cpSync(srcUploads, path.join(outDir, "uploads"), { recursive: true });
   }
 
+  if (entry.canvasBgImage) {
+    entry.canvasBgImage = toRelativeUploadPath(entry.canvasBgImage);
+  }
+
   let previewUrl = null;
   for (const item of entry.items || []) {
     if (item.type === "photo" && item.img) {

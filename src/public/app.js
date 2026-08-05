@@ -264,11 +264,11 @@ function scheduleSaveEntry() {
   setSaveIndicator("saving\u2026");
   clearTimeout(saveEntryTimer);
   saveEntryTimer = setTimeout(async () => {
-    const { id, title, date, items, canvasBg } = state.activeEntry;
+    const { id, title, date, items, canvasBg, canvasBgImage } = state.activeEntry;
     await fetch(`/api/entries/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, date, items, canvasBg }),
+      body: JSON.stringify({ title, date, items, canvasBg, canvasBgImage }),
     });
     setSaveIndicator("saved");
   }, 500);
@@ -403,6 +403,117 @@ async function uploadCroppedPhoto(blob, pos) {
   renderCanvas();
   scheduleSaveEntry();
 }
+
+// ---------- paste & drag-and-drop photos ----------
+// A second, lighter-weight way to add a photo, alongside the +Photo
+// button's deliberate crop-to-square-polaroid flow: pasting an image
+// (Cmd/Ctrl+V after copying one elsewhere) or dragging one in from outside
+// the page. Both skip the crop modal entirely and land as a frameless photo
+// at its original aspect ratio — see handleIncomingImage. The user can
+// still turn it into a polaroid afterward via the existing frame-toggle
+// button; the polaroid frame's CSS (aspect-ratio: 1/1 + object-fit: cover
+// on .polaroid img) crops it to square purely visually at that point,
+// without touching the uploaded pixels.
+
+/**
+ * Upload an image obtained via paste or drag-and-drop (not the crop modal)
+ * and add it as a new, frameless photo item at its original aspect ratio —
+ * unlike uploadCroppedPhoto, nothing here forces it to a square crop.
+ * @param {Blob|File} blob - The incoming image.
+ * @param {{x: number, y: number}} pos - Target canvas position (%).
+ * @returns {Promise<void>}
+ */
+async function handleIncomingImage(blob, pos) {
+  if (!state.activeEntry || !blob || !blob.type || !blob.type.startsWith("image/")) return;
+  const form = new FormData();
+  form.append("photo", blob, blob.name || "photo.jpg");
+  const res = await fetch(`/api/entries/${state.activeEntry.id}/uploads`, { method: "POST", body: form });
+  if (!res.ok) return;
+  const { url } = await res.json();
+  const item = {
+    id: `photo-${Date.now()}`,
+    type: "photo",
+    x: pos.x,
+    y: pos.y,
+    rot: Math.round((Math.random() * 12 - 6) * 10) / 10,
+    w: 220,
+    img: url,
+    caption: "",
+    color: WASHI_COLORS[Math.floor(Math.random() * WASHI_COLORS.length)],
+    z: ++zCounter,
+    frame: "none",
+  };
+  state.activeEntry.items.push(item);
+  renderCanvas();
+  scheduleSaveEntry();
+}
+
+// Pasting anywhere while an entry is open adds a clipboard image as a new
+// photo item, as long as no crop modal is already open (that has its own,
+// unrelated pointer/keyboard handling) — this deliberately does NOT check
+// what's focused, so pasting an image while a note is focused still adds a
+// photo instead of trying (and failing) to inline it into the note text.
+// A paste with no image data (e.g. plain text into a note) is left alone.
+document.addEventListener("paste", (e) => {
+  if (state.view !== "entry" || !state.activeEntry) return;
+  if (document.querySelector(".crop-overlay")) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const dtItem of items) {
+    if (dtItem.kind === "file" && dtItem.type.startsWith("image/")) {
+      e.preventDefault();
+      const file = dtItem.getAsFile();
+      if (file) handleIncomingImage(file, getViewportCenterCanvasPos());
+      break;
+    }
+  }
+});
+
+// Dragging a file over the canvas must call preventDefault on dragover, or
+// the browser refuses to fire "drop" at all (its default action for a drop
+// target is just to reject the drag). The window-level listeners are a
+// safety net so a drop that misses the canvas doesn't navigate the whole
+// app away to the dropped file/image.
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
+
+el("canvas").addEventListener("dragover", (e) => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+});
+
+el("canvas").addEventListener("drop", async (e) => {
+  e.preventDefault();
+  if (!state.activeEntry) return;
+  const rect = el("canvas").getBoundingClientRect();
+  const x = Math.min(96, Math.max(4, ((e.clientX - rect.left) / rect.width) * 100));
+  const y = Math.max(2, ((e.clientY - rect.top) / CANVAS_UNIT_HEIGHT) * 100);
+
+  const files = [...(e.dataTransfer.files || [])].filter((f) => f.type.startsWith("image/"));
+  if (files.length) {
+    // Stagger multiple dropped images slightly so they don't land in an
+    // exact stack on top of each other.
+    for (let i = 0; i < files.length; i++) {
+      await handleIncomingImage(files[i], { x: Math.min(96, x + i * 3), y: y + i * 3 });
+    }
+    return;
+  }
+
+  // No raw file bytes — this is likely an image dragged in from another
+  // browser tab/webpage, which hands over a URL instead. Try to fetch it;
+  // many sites block cross-origin image fetches (CORS), in which case this
+  // silently does nothing rather than erroring.
+  const uri = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain");
+  if (uri && /^https?:\/\//i.test(uri)) {
+    try {
+      const res = await fetch(uri);
+      const blob = await res.blob();
+      if (blob.type.startsWith("image/")) await handleIncomingImage(blob, { x, y });
+    } catch {
+      /* cross-origin or network failure — nothing more we can do */
+    }
+  }
+});
 
 // ---------- photo crop modal ----------
 // Crops client-side to a 1:1 square (to match the polaroid frame) before
@@ -1031,29 +1142,79 @@ function resetCanvasState() {
 const CANVAS_BG_PRESETS = ["#e9e2d0", "#1b2129", "#f3ebda", "#2e2216", "#dce8dc", "#e8d7e0"];
 
 /**
- * Apply the open entry's saved canvas background (state.activeEntry.canvasBg)
- * to the canvas element. A custom color replaces the default paper texture
- * entirely (background-image: none); no color set reverts to the CSS
- * default (cream background + subtle radial-gradient texture).
+ * Apply the open entry's saved canvas background — either an uploaded image
+ * (state.activeEntry.canvasBgImage, cover-fit and centered) or a solid color
+ * (state.activeEntry.canvasBg) — to the canvas element. The two are mutually
+ * exclusive (see setCanvasBackground/setCanvasBackgroundImage); an image
+ * takes precedence if somehow both were set. No color/image set reverts to
+ * the CSS default (cream background + subtle radial-gradient texture).
  */
 function applyCanvasBackground() {
   const canvas = el("canvas");
   const bg = state.activeEntry.canvasBg;
+  const bgImage = state.activeEntry.canvasBgImage;
   canvas.style.backgroundColor = bg || "";
-  canvas.style.backgroundImage = bg ? "none" : "";
+  if (bgImage) {
+    canvas.style.backgroundImage = `url("${bgImage}")`;
+    canvas.style.backgroundSize = "cover";
+    canvas.style.backgroundPosition = "center";
+    canvas.style.backgroundRepeat = "no-repeat";
+  } else {
+    canvas.style.backgroundImage = bg ? "none" : "";
+    canvas.style.backgroundSize = "";
+    canvas.style.backgroundPosition = "";
+    canvas.style.backgroundRepeat = "";
+  }
 }
 
 /**
- * Set (or clear, with a falsy color) the open entry's canvas background,
- * apply it immediately, and save.
+ * Set (or clear, with a falsy color) the open entry's solid-color canvas
+ * background, apply it immediately, and save. Clears any background image —
+ * the two are mutually exclusive, so picking a color always wins outright
+ * rather than sitting invisibly underneath an image.
  * @param {string|null} color - A CSS color string, or null/undefined to
  *   reset to the default paper texture.
  */
 function setCanvasBackground(color) {
   state.activeEntry.canvasBg = color || undefined;
+  state.activeEntry.canvasBgImage = undefined;
   applyCanvasBackground();
   scheduleSaveEntry();
 }
+
+/**
+ * Set (or clear, with a falsy url) the open entry's canvas background image,
+ * apply it immediately, and save.
+ * @param {string|null} url - An uploaded image URL, or null/undefined to remove it.
+ */
+function setCanvasBackgroundImage(url) {
+  state.activeEntry.canvasBgImage = url || undefined;
+  applyCanvasBackground();
+  scheduleSaveEntry();
+}
+
+/**
+ * Open the hidden file picker used to upload a canvas background image.
+ */
+function triggerCanvasBgImagePick() {
+  el("canvas-bg-file-input").click();
+}
+
+// Fires once a file is picked (or the dialog is cancelled) for a canvas
+// background image. Uploaded as-is (no crop step, unlike photo items) since
+// background-size: cover already fits/crops it visually without needing to
+// touch the original pixels.
+el("canvas-bg-file-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file || !state.activeEntry) return;
+  const form = new FormData();
+  form.append("photo", file, file.name || "background.jpg");
+  const res = await fetch(`/api/entries/${state.activeEntry.id}/uploads`, { method: "POST", body: form });
+  if (!res.ok) return;
+  const { url } = await res.json();
+  setCanvasBackgroundImage(url);
+});
 
 // ---------- right-click canvas menu ----------
 
@@ -1198,9 +1359,24 @@ function renderContextMenuBackground(menu) {
   customRow.append(customLabel, customInput);
   menu.appendChild(customRow);
 
-  const divider = document.createElement("div");
-  divider.className = "context-menu-divider";
-  menu.appendChild(divider);
+  const divider1 = document.createElement("div");
+  divider1.className = "context-menu-divider";
+  menu.appendChild(divider1);
+
+  addContextMenuItem(menu, "🖼️  Upload background image", () => {
+    triggerCanvasBgImagePick();
+    closeContextMenu();
+  });
+  if (state.activeEntry.canvasBgImage) {
+    addContextMenuItem(menu, "✕  Remove background image", () => {
+      setCanvasBackgroundImage(null);
+      closeContextMenu();
+    });
+  }
+
+  const divider2 = document.createElement("div");
+  divider2.className = "context-menu-divider";
+  menu.appendChild(divider2);
 
   addContextMenuItem(menu, "↺  Reset to default", () => {
     setCanvasBackground(null);
@@ -1737,6 +1913,13 @@ function createPhotoFrameBar(item) {
   toggleBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
   toggleBtn.addEventListener("click", () => {
     item.frame = item.frame === "none" ? undefined : "none";
+    // A prior resize's item.h means something different in each mode (a
+    // proportional scale when frameless vs. a deliberate stretch inside a
+    // polaroid — see startResize/updateItemWrap), so it doesn't carry
+    // across the toggle: drop it and let the new frame fall back to its
+    // own default (natural ratio frameless, or the polaroid's CSS-driven
+    // square crop) rather than displaying a stale, mismatched stretch.
+    item.h = undefined;
     // Switching frames changes this item's DOM shape (polaroid-card vs
     // bare <img>) enough that patching in place isn't worth it — drop its
     // cached wrap so renderCanvas rebuilds just this one item from scratch.
@@ -2157,7 +2340,13 @@ function updateItemWrap(item, wrap) {
   const resizeTarget = resizableElRefs.get(item.id);
   if (resizeTarget) {
     resizeTarget.style.height = item.h ? `${item.h}px` : "";
-    if (item.type === "photo") resizeTarget.style.objectFit = item.h ? "fill" : "";
+    // A polaroid's resize is a deliberate stretch (object-fit: fill); a
+    // frameless photo's item.w/item.h are already kept in its natural ratio
+    // by the resize handle itself (see startResize/onPointerMove), so
+    // "cover" here is just a rounding safety net, never an actual crop.
+    if (item.type === "photo") {
+      resizeTarget.style.objectFit = item.h ? (item.frame === "none" ? "cover" : "fill") : "";
+    }
     // Frameless items (text boxes, "none"-frame photos) have no card
     // background of their own, so show a dashed outline while selected —
     // otherwise their bounds would be invisible.
@@ -2428,12 +2617,21 @@ function startRotate(e, item) {
  * and padding), or the editor div for a text box — via offsetHeight (which
  * ignores the wrap's rotation transform), rather than item.h directly,
  * since item.h starts undefined (natural/auto height) until the first resize.
+ * A frameless photo also records its natural width/height ratio (read
+ * straight off the loaded <img>, so this works retroactively for any photo
+ * with no schema change) — onPointerMove uses it to scale the image
+ * uniformly instead of stretching it, since only a polaroid's crop is
+ * meant to distort the image.
  * @param {PointerEvent} e - The pointerdown on the resize handle.
  * @param {object} item - The item being resized (photo or text box).
  */
 function startResize(e, item) {
   e.stopPropagation();
   const contentEl = resizableElRefs.get(item.id);
+  let aspectRatio = null;
+  if (item.type === "photo" && item.frame === "none" && contentEl && contentEl.naturalWidth && contentEl.naturalHeight) {
+    aspectRatio = contentEl.naturalWidth / contentEl.naturalHeight;
+  }
   dragInfo = {
     id: item.id,
     mode: "resize",
@@ -2441,6 +2639,7 @@ function startResize(e, item) {
     startY: e.clientY,
     origW: item.w,
     origH: item.h || (contentEl ? contentEl.offsetHeight : 150),
+    aspectRatio,
   };
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp);
@@ -2483,7 +2682,9 @@ function onPointerMove(e) {
       item.rot = Math.round(angle + 90);
     } else if (dragInfo.mode === "resize") {
       item.w = Math.max(60, Math.round(dragInfo.origW + (e.clientX - dragInfo.startX)));
-      item.h = Math.max(30, Math.round(dragInfo.origH + (e.clientY - dragInfo.startY)));
+      item.h = dragInfo.aspectRatio
+        ? Math.max(30, Math.round(item.w / dragInfo.aspectRatio))
+        : Math.max(30, Math.round(dragInfo.origH + (e.clientY - dragInfo.startY)));
     }
   }
   renderCanvas();
@@ -2648,7 +2849,14 @@ function renderReadOnlyCanvas(entry) {
   const canvas = el("readonly-canvas");
   canvas.innerHTML = "";
   canvas.style.backgroundColor = entry.canvasBg || "";
-  canvas.style.backgroundImage = entry.canvasBg ? "none" : "";
+  if (entry.canvasBgImage) {
+    canvas.style.backgroundImage = `url("${entry.canvasBgImage}")`;
+    canvas.style.backgroundSize = "cover";
+    canvas.style.backgroundPosition = "center";
+    canvas.style.backgroundRepeat = "no-repeat";
+  } else {
+    canvas.style.backgroundImage = entry.canvasBg ? "none" : "";
+  }
 
   let maxBottom = CANVAS_UNIT_HEIGHT;
   for (const item of entry.items || []) {
@@ -2701,7 +2909,7 @@ function createReadOnlyPhotoCard(item) {
   img.draggable = false;
   if (item.h) {
     img.style.height = `${item.h}px`;
-    img.style.objectFit = "fill";
+    img.style.objectFit = item.frame === "none" ? "cover" : "fill";
   }
 
   if (item.frame === "none") {
@@ -2743,14 +2951,21 @@ function createReadOnlyTextCard(item) {
 
 /**
  * @param {object} item - The youtube-type item.
- * @returns {HTMLElement} A card with album art/title/artist plus a plain
- *   YouTube embed using YouTube's own native controls — not this app's
- *   custom player (which is wired to autosave volume/repeat changes back
- *   to the entry, which a read-only page must never do).
+ * @returns {HTMLElement} The same "Now Playing"-style card as the editor's
+ *   createYoutubeCard (status pill, art/title/artist, progress bar,
+ *   transport controls, volume) minus the "change song" button — driven by
+ *   a real YT.Player (see initReadOnlyYoutubePlayer), not a plain iframe, so
+ *   it looks and behaves identically. It never calls scheduleSaveEntry
+ *   (there's no server to save to on a read-only page); a repeat toggle
+ *   here is a local, per-view preference, not a persisted one.
  */
 function createReadOnlyYoutubeCard(item) {
   const card = document.createElement("div");
   card.className = "yt-player-card";
+
+  const pill = document.createElement("div");
+  pill.className = "yt-pill";
+  pill.textContent = "Paused";
 
   const main = document.createElement("div");
   main.className = "yt-main";
@@ -2770,17 +2985,265 @@ function createReadOnlyYoutubeCard(item) {
   info.append(titleEl, artistEl);
   main.append(art, info);
 
-  // Autoplay is attempted but browsers typically block it without a user
-  // gesture — the native YouTube controls let the viewer press play themselves.
-  const frame = document.createElement("iframe");
-  frame.className = "yt-readonly-frame";
-  frame.src = `https://www.youtube.com/embed/${item.videoId}?rel=0&autoplay=1`;
-  frame.title = item.title || "YouTube video";
-  frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture";
-  frame.allowFullscreen = true;
+  const progress = document.createElement("div");
+  progress.className = "yt-progress";
+  const track = document.createElement("div");
+  track.className = "yt-track";
+  const fill = document.createElement("div");
+  fill.className = "yt-fill";
+  track.appendChild(fill);
+  track.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    const rect = track.getBoundingClientRect();
+    seekReadOnlyYoutubeToRatio(item.id, Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)));
+  });
+  const times = document.createElement("div");
+  times.className = "yt-times";
+  const elapsedEl = document.createElement("span");
+  elapsedEl.textContent = "0:00";
+  const durationEl = document.createElement("span");
+  durationEl.textContent = "0:00";
+  times.append(elapsedEl, durationEl);
+  progress.append(track, times);
 
-  card.append(main, frame);
+  const controls = document.createElement("div");
+  controls.className = "yt-controls";
+  const rewindBtn = document.createElement("button");
+  rewindBtn.className = "yt-ctrl-btn";
+  rewindBtn.textContent = "⏪";
+  rewindBtn.title = "Back 10s";
+  rewindBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  rewindBtn.addEventListener("click", () => seekReadOnlyYoutube(item.id, -10));
+
+  const playBtn = document.createElement("button");
+  playBtn.className = "yt-ctrl-btn yt-play";
+  playBtn.textContent = "▶";
+  playBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  playBtn.addEventListener("click", () => toggleReadOnlyYoutubePlay(item.id));
+
+  const forwardBtn = document.createElement("button");
+  forwardBtn.className = "yt-ctrl-btn";
+  forwardBtn.textContent = "⏩";
+  forwardBtn.title = "Forward 10s";
+  forwardBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  forwardBtn.addEventListener("click", () => seekReadOnlyYoutube(item.id, 10));
+
+  const repeatBtn = document.createElement("button");
+  repeatBtn.className = "yt-ctrl-btn yt-repeat" + (item.repeat ? " active" : "");
+  repeatBtn.textContent = "\u{1F501}";
+  repeatBtn.title = "Repeat";
+  repeatBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  repeatBtn.addEventListener("click", () => {
+    item.repeat = !item.repeat; // local-only toggle, not persisted
+    repeatBtn.classList.toggle("active", item.repeat);
+  });
+
+  controls.append(rewindBtn, playBtn, forwardBtn, repeatBtn);
+
+  const volumeRow = document.createElement("div");
+  volumeRow.className = "yt-volume-row";
+  const volumeIcon = document.createElement("span");
+  volumeIcon.className = "yt-volume-icon";
+  // Autoplay only reliably works muted (browsers block unmuted autoplay
+  // without a prior user gesture) — the icon reflects that starting state
+  // and doubles as a one-click unmute, since the volume slider alone isn't
+  // an obvious enough affordance that the player starts silent.
+  volumeIcon.textContent = "\u{1F507}";
+  volumeIcon.title = "Muted for autoplay — click to unmute";
+  volumeIcon.style.cursor = "pointer";
+  volumeIcon.addEventListener("pointerdown", (e) => e.stopPropagation());
+  volumeIcon.addEventListener("click", () => toggleReadOnlyYoutubeMute(item.id, volumeIcon));
+  const volumeSlider = document.createElement("input");
+  volumeSlider.type = "range";
+  volumeSlider.className = "yt-volume-slider";
+  volumeSlider.min = "0";
+  volumeSlider.max = "100";
+  volumeSlider.value = String(item.volume ?? 100);
+  volumeSlider.addEventListener("pointerdown", (e) => e.stopPropagation());
+  volumeSlider.addEventListener("input", (e) => setReadOnlyYoutubeVolume(item.id, Number(e.target.value), volumeIcon));
+  volumeRow.append(volumeIcon, volumeSlider);
+
+  const mount = document.createElement("div");
+  mount.className = "yt-mount";
+
+  card.append(pill, main, progress, controls, volumeRow, mount);
+
+  readOnlyYtCardRefs.set(item.id, { pill, fill, elapsedEl, durationEl, playBtn, mount, volumeIcon });
+  initReadOnlyYoutubePlayer(item);
+
   return card;
+}
+
+// A separate player/ref registry from the editor's ytPlayers/ytCardRefs —
+// the read-only view never touches editor state (state.activeEntry is
+// never set on the /view/<id> route) and must never call scheduleSaveEntry.
+const readOnlyYtPlayers = new Map(); // item.id -> { player, progressTimer, muted }
+const readOnlyYtCardRefs = new Map(); // item.id -> dom refs for live updates
+
+/**
+ * Create (idempotently) the real YT.Player for a read-only music item,
+ * starting muted — the only autoplay approach real browsers reliably allow
+ * without a prior user gesture — at the item's saved volume level, ready to
+ * unmute the instant the viewer clicks the volume icon/slider.
+ * @param {object} item
+ * @returns {Promise<void>}
+ */
+async function initReadOnlyYoutubePlayer(item) {
+  const YT = await loadYoutubeApi();
+  const refs = readOnlyYtCardRefs.get(item.id);
+  if (!refs || readOnlyYtPlayers.has(item.id)) return;
+  const player = new YT.Player(refs.mount, {
+    videoId: item.videoId,
+    width: "2",
+    height: "2",
+    playerVars: { autoplay: 1, mute: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1 },
+    events: {
+      onReady: (e) => {
+        e.target.setVolume(item.volume ?? 100);
+        e.target.mute();
+        e.target.playVideo();
+      },
+      onStateChange: (e) => onReadOnlyYoutubeStateChange(item, e.data),
+    },
+  });
+  readOnlyYtPlayers.set(item.id, { player, progressTimer: null, muted: true });
+}
+
+/**
+ * @param {string} id
+ * @returns {void}
+ */
+function startReadOnlyProgressPolling(id) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry || entry.progressTimer) return;
+  entry.progressTimer = setInterval(() => updateReadOnlyYoutubeProgress(id), 500);
+  updateReadOnlyYoutubeProgress(id);
+}
+
+/** @param {string} id @returns {void} */
+function stopReadOnlyProgressPolling(id) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry || !entry.progressTimer) return;
+  clearInterval(entry.progressTimer);
+  entry.progressTimer = null;
+}
+
+/** @param {string} id @returns {void} */
+function updateReadOnlyYoutubeProgress(id) {
+  const entry = readOnlyYtPlayers.get(id);
+  const refs = readOnlyYtCardRefs.get(id);
+  if (!entry || !refs) return;
+  let current = 0;
+  let duration = 0;
+  try {
+    current = entry.player.getCurrentTime() || 0;
+    duration = entry.player.getDuration() || 0;
+  } catch {
+    return;
+  }
+  refs.fill.style.width = duration ? `${Math.min(100, (current / duration) * 100)}%` : "0%";
+  refs.elapsedEl.textContent = formatTime(current);
+  refs.durationEl.textContent = formatTime(duration);
+}
+
+/**
+ * @param {object} item
+ * @param {number} stateVal - A window.YT.PlayerState.* constant.
+ * @returns {void}
+ */
+function onReadOnlyYoutubeStateChange(item, stateVal) {
+  const YT = window.YT;
+  const refs = readOnlyYtCardRefs.get(item.id);
+  const isPlaying = stateVal === YT.PlayerState.PLAYING;
+  if (refs) {
+    refs.playBtn.textContent = isPlaying ? "⏸" : "▶";
+    refs.pill.textContent = isPlaying ? "Playing" : stateVal === YT.PlayerState.ENDED ? "Ended" : "Paused";
+    refs.pill.classList.toggle("playing", isPlaying);
+  }
+  if (isPlaying) startReadOnlyProgressPolling(item.id);
+  else stopReadOnlyProgressPolling(item.id);
+
+  if (stateVal === YT.PlayerState.ENDED && item.repeat) {
+    const entry = readOnlyYtPlayers.get(item.id);
+    if (entry) {
+      entry.player.seekTo(0, true);
+      entry.player.playVideo();
+    }
+  }
+}
+
+/** @param {string} id @returns {void} */
+function toggleReadOnlyYoutubePlay(id) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry) return;
+  const isPlaying = entry.player.getPlayerState() === window.YT.PlayerState.PLAYING;
+  if (isPlaying) entry.player.pauseVideo();
+  else entry.player.playVideo();
+}
+
+/**
+ * @param {string} id
+ * @param {number} deltaSeconds
+ * @returns {void}
+ */
+function seekReadOnlyYoutube(id, deltaSeconds) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry) return;
+  entry.player.seekTo(Math.max(0, entry.player.getCurrentTime() + deltaSeconds), true);
+}
+
+/**
+ * @param {string} id
+ * @param {number} ratio - 0 (start) to 1 (end).
+ * @returns {void}
+ */
+function seekReadOnlyYoutubeToRatio(id, ratio) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry) return;
+  const duration = entry.player.getDuration();
+  if (duration) entry.player.seekTo(duration * ratio, true);
+}
+
+/**
+ * Set a read-only music item's volume and, since a nonzero volume clearly
+ * signals the viewer wants to hear it, unmute if this is the first time
+ * they've touched the slider.
+ * @param {string} id
+ * @param {number} volume - 0-100.
+ * @param {HTMLElement} volumeIconEl
+ * @returns {void}
+ */
+function setReadOnlyYoutubeVolume(id, volume, volumeIconEl) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry) return;
+  entry.player.setVolume(volume);
+  if (entry.muted) {
+    entry.player.unMute();
+    entry.muted = false;
+    volumeIconEl.textContent = "\u{1F50A}";
+    volumeIconEl.title = "Mute";
+  }
+}
+
+/**
+ * @param {string} id
+ * @param {HTMLElement} volumeIconEl
+ * @returns {void}
+ */
+function toggleReadOnlyYoutubeMute(id, volumeIconEl) {
+  const entry = readOnlyYtPlayers.get(id);
+  if (!entry) return;
+  if (entry.muted) {
+    entry.player.unMute();
+    entry.muted = false;
+    volumeIconEl.textContent = "\u{1F50A}";
+    volumeIconEl.title = "Mute";
+  } else {
+    entry.player.mute();
+    entry.muted = true;
+    volumeIconEl.textContent = "\u{1F507}";
+    volumeIconEl.title = "Unmute";
+  }
 }
 
 // ---------- boot ----------

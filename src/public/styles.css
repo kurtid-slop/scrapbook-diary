@@ -194,15 +194,6 @@ body {
   color: #e9dcc4;
 }
 
-.yt-readonly-frame {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border: none;
-  border-radius: 6px;
-  margin-top: 10px;
-  display: block;
-}
-
 .entry-title-input {
   font-size: 28px;
   background: transparent;
@@ -271,6 +262,13 @@ body {
 
 .polaroid img {
   width: 100%;
+  /* Crops to a square purely visually (no pixel data touched), so a photo
+     dropped/pasted straight into a polaroid frame at its original aspect
+     ratio still reads as a classic square polaroid — see also the resize
+     handle's aspect-lock for frame:"none" photos, which deliberately does
+     NOT get this treatment. */
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
   display: block;
   pointer-events: none;
 }
