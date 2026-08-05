@@ -1165,6 +1165,11 @@ function applyCanvasBackground() {
     canvas.style.backgroundPosition = "";
     canvas.style.backgroundRepeat = "";
   }
+  // The default look's inset box-shadow is a warm vignette meant to shade
+  // the paper texture — left on, it darkens the edges of a custom color/
+  // image too, which reads as "not actually solid". Suppress it whenever
+  // either override is active.
+  canvas.classList.toggle("custom-bg", !!(bg || bgImage));
 }
 
 /**
@@ -1446,9 +1451,11 @@ function openItemContextMenu(clientX, clientY, item) {
 
 /**
  * Render the per-item right-click menu's content: the layering actions
- * (Bring to Front / Bring Forward / Send Backward / Send to Back), a
- * divider, then Delete. Each option applies its change (and, for the
- * layering ones, saves), then closes the menu.
+ * (Bring to Front / Bring Forward / Send Backward / Send to Back); for a
+ * photo specifically, a second section (flip horizontal/vertical, toggle
+ * tape, toggle shadow — see createPhotoCard/updateItemWrap for how each is
+ * applied); then a divider and Delete. Each option applies its change (and,
+ * for the layering/photo ones, saves), then closes the menu.
  * @param {HTMLElement} menu
  * @param {object} item - The item the menu was opened for.
  */
@@ -1472,6 +1479,42 @@ function renderItemContextMenu(menu, item) {
     sendItemToBack(item);
     closeContextMenu();
   });
+
+  if (item.type === "photo") {
+    const photoDivider = document.createElement("div");
+    photoDivider.className = "context-menu-divider";
+    menu.appendChild(photoDivider);
+
+    addContextMenuItem(menu, "↔️  Flip horizontal", () => {
+      item.flipH = !item.flipH;
+      renderCanvas();
+      scheduleSaveEntry();
+      closeContextMenu();
+    });
+    addContextMenuItem(menu, "↕️  Flip vertical", () => {
+      item.flipV = !item.flipV;
+      renderCanvas();
+      scheduleSaveEntry();
+      closeContextMenu();
+    });
+    addContextMenuItem(menu, item.tape === false ? "🩹  Show tape" : "🩹  Hide tape", () => {
+      item.tape = item.tape === false ? undefined : false;
+      // The washi strip is only ever created inside createItemWrap (not
+      // patched per-render in updateItemWrap), so toggling it needs a
+      // rebuild-from-scratch, same as the frame toggle.
+      forceRebuildItem(item.id);
+      renderCanvas();
+      scheduleSaveEntry();
+      closeContextMenu();
+    });
+    addContextMenuItem(menu, item.shadow === false ? "🌗  Show shadow" : "🌗  Hide shadow", () => {
+      item.shadow = item.shadow === false ? undefined : false;
+      forceRebuildItem(item.id);
+      renderCanvas();
+      scheduleSaveEntry();
+      closeContextMenu();
+    });
+  }
 
   const divider = document.createElement("div");
   divider.className = "context-menu-divider";
@@ -1898,7 +1941,9 @@ function createNoteBgBar(item) {
 /**
  * Build the frame-style toolbar shown when a photo is selected: a single
  * toggle button that switches between the default polaroid frame (with
- * caption) and a bare, frameless image.
+ * caption) and a bare, frameless image. Flip/tape/shadow live in the
+ * right-click menu instead (see renderItemContextMenu) — right-click-only,
+ * not duplicated here.
  * @param {object} item - The photo-type canvas item.
  * @returns {HTMLElement} The assembled toolbar element.
  */
@@ -2014,12 +2059,12 @@ function createPhotoCard(item) {
   // "none" frame: the bare image is the whole card — no caption, no
   // polaroid paper/shadow/padding, just the photo sitting on the page.
   if (item.frame === "none") {
-    img.className = "plain-photo-img";
+    img.className = "plain-photo-img" + (item.shadow === false ? " no-shadow" : "");
     return img;
   }
 
   const card = document.createElement("div");
-  card.className = "polaroid";
+  card.className = "polaroid" + (item.shadow === false ? " no-shadow" : "");
   const caption = document.createElement("input");
   caption.className = "caption-input";
   caption.placeholder = "caption...";
@@ -2115,9 +2160,21 @@ function createYoutubeCard(item) {
   const card = document.createElement("div");
   card.className = "yt-player-card";
 
+  const header = document.createElement("div");
+  header.className = "yt-header";
   const pill = document.createElement("div");
   pill.className = "yt-pill";
   pill.textContent = "Paused";
+  const collapseBtn = document.createElement("button");
+  collapseBtn.className = "yt-collapse-btn";
+  collapseBtn.textContent = "⌄";
+  collapseBtn.title = "Hide controls";
+  collapseBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  collapseBtn.addEventListener("click", () => {
+    const collapsed = card.classList.toggle("collapsed");
+    collapseBtn.title = collapsed ? "Show controls" : "Hide controls";
+  });
+  header.append(pill, collapseBtn);
 
   const main = document.createElement("div");
   main.className = "yt-main";
@@ -2217,7 +2274,14 @@ function createYoutubeCard(item) {
   const mount = document.createElement("div");
   mount.className = "yt-mount";
 
-  card.append(pill, main, progress, controls, volumeRow, mount);
+  // Grouped so the "hide controls" toggle can collapse both at once — the
+  // progress bar stays visible either way, since that's the part worth
+  // seeing even with the card collapsed.
+  const collapsible = document.createElement("div");
+  collapsible.className = "yt-collapsible";
+  collapsible.append(controls, volumeRow);
+
+  card.append(header, main, progress, collapsible, mount);
 
   ytCardRefs.set(item.id, { pill, titleEl, artistEl, artImg, fill, elapsedEl, durationEl, playBtn, mount });
 
@@ -2278,8 +2342,9 @@ function createItemWrap(item) {
   });
 
   // Text boxes are meant to float free on the page, not look taped down —
-  // skip the washi tape strip that every other item type gets.
-  if (item.type !== "text") {
+  // skip the washi tape strip that every other item type gets. A photo can
+  // also have its tape turned off individually (see createPhotoFrameBar).
+  if (item.type !== "text" && !(item.type === "photo" && item.tape === false)) {
     const washi = document.createElement("div");
     washi.className = "washi";
     washi.style.background = item.color;
@@ -2346,6 +2411,11 @@ function updateItemWrap(item, wrap) {
     // "cover" here is just a rounding safety net, never an actual crop.
     if (item.type === "photo") {
       resizeTarget.style.objectFit = item.h ? (item.frame === "none" ? "cover" : "fill") : "";
+      // Flip is applied to the image itself, not the wrap — the wrap also
+      // carries rotation/position for the washi tape and selection chrome,
+      // which shouldn't mirror along with the photo (see renderItemContextMenu).
+      resizeTarget.style.transform =
+        item.flipH || item.flipV ? `scale(${item.flipH ? -1 : 1}, ${item.flipV ? -1 : 1})` : "";
     }
     // Frameless items (text boxes, "none"-frame photos) have no card
     // background of their own, so show a dashed outline while selected —
@@ -2857,6 +2927,7 @@ function renderReadOnlyCanvas(entry) {
   } else {
     canvas.style.backgroundImage = entry.canvasBg ? "none" : "";
   }
+  canvas.classList.toggle("custom-bg", !!(entry.canvasBg || entry.canvasBgImage));
 
   let maxBottom = CANVAS_UNIT_HEIGHT;
   for (const item of entry.items || []) {
@@ -2871,7 +2942,7 @@ function renderReadOnlyCanvas(entry) {
     wrap.style.zIndex = item.z;
     wrap.style.transform = `translate(-50%, -50%) rotate(${item.rot}deg)`;
 
-    if (item.type !== "text") {
+    if (item.type !== "text" && !(item.type === "photo" && item.tape === false)) {
       const washi = document.createElement("div");
       washi.className = "washi";
       washi.style.background = item.color;
@@ -2911,14 +2982,17 @@ function createReadOnlyPhotoCard(item) {
     img.style.height = `${item.h}px`;
     img.style.objectFit = item.frame === "none" ? "cover" : "fill";
   }
+  if (item.flipH || item.flipV) {
+    img.style.transform = `scale(${item.flipH ? -1 : 1}, ${item.flipV ? -1 : 1})`;
+  }
 
   if (item.frame === "none") {
-    img.className = "plain-photo-img";
+    img.className = "plain-photo-img" + (item.shadow === false ? " no-shadow" : "");
     return img;
   }
 
   const card = document.createElement("div");
-  card.className = "polaroid";
+  card.className = "polaroid" + (item.shadow === false ? " no-shadow" : "");
   const caption = document.createElement("div");
   caption.className = "caption-input";
   caption.textContent = item.caption || "";
@@ -2963,9 +3037,21 @@ function createReadOnlyYoutubeCard(item) {
   const card = document.createElement("div");
   card.className = "yt-player-card";
 
+  const header = document.createElement("div");
+  header.className = "yt-header";
   const pill = document.createElement("div");
   pill.className = "yt-pill";
   pill.textContent = "Paused";
+  const collapseBtn = document.createElement("button");
+  collapseBtn.className = "yt-collapse-btn";
+  collapseBtn.textContent = "⌄";
+  collapseBtn.title = "Hide controls";
+  collapseBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  collapseBtn.addEventListener("click", () => {
+    const collapsed = card.classList.toggle("collapsed");
+    collapseBtn.title = collapsed ? "Show controls" : "Hide controls";
+  });
+  header.append(pill, collapseBtn);
 
   const main = document.createElement("div");
   main.className = "yt-main";
@@ -3066,7 +3152,11 @@ function createReadOnlyYoutubeCard(item) {
   const mount = document.createElement("div");
   mount.className = "yt-mount";
 
-  card.append(pill, main, progress, controls, volumeRow, mount);
+  const collapsible = document.createElement("div");
+  collapsible.className = "yt-collapsible";
+  collapsible.append(controls, volumeRow);
+
+  card.append(header, main, progress, collapsible, mount);
 
   readOnlyYtCardRefs.set(item.id, { pill, fill, elapsedEl, durationEl, playBtn, mount, volumeIcon });
   initReadOnlyYoutubePlayer(item);
