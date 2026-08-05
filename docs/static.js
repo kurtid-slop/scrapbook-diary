@@ -88,12 +88,15 @@ function createReadOnlyPhotoCard(item) {
     img.style.height = `${item.h}px`;
     img.style.objectFit = item.frame === "none" ? "cover" : "fill";
   }
+  if (item.flipH || item.flipV) {
+    img.style.transform = `scale(${item.flipH ? -1 : 1}, ${item.flipV ? -1 : 1})`;
+  }
   if (item.frame === "none") {
-    img.className = "plain-photo-img";
+    img.className = "plain-photo-img" + (item.shadow === false ? " no-shadow" : "");
     return img;
   }
   const card = document.createElement("div");
-  card.className = "polaroid";
+  card.className = "polaroid" + (item.shadow === false ? " no-shadow" : "");
   const caption = document.createElement("div");
   caption.className = "caption-input";
   caption.textContent = item.caption || "";
@@ -176,9 +179,21 @@ function createReadOnlyYoutubeCard(item) {
   const card = document.createElement("div");
   card.className = "yt-player-card";
 
+  const header = document.createElement("div");
+  header.className = "yt-header";
   const pill = document.createElement("div");
   pill.className = "yt-pill";
   pill.textContent = "Paused";
+  const collapseBtn = document.createElement("button");
+  collapseBtn.className = "yt-collapse-btn";
+  collapseBtn.textContent = "⌄";
+  collapseBtn.title = "Hide controls";
+  collapseBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  collapseBtn.addEventListener("click", () => {
+    const collapsed = card.classList.toggle("collapsed");
+    collapseBtn.title = collapsed ? "Show controls" : "Hide controls";
+  });
+  header.append(pill, collapseBtn);
 
   const main = document.createElement("div");
   main.className = "yt-main";
@@ -275,7 +290,11 @@ function createReadOnlyYoutubeCard(item) {
   const mount = document.createElement("div");
   mount.className = "yt-mount";
 
-  card.append(pill, main, progress, controls, volumeRow, mount);
+  const collapsible = document.createElement("div");
+  collapsible.className = "yt-collapsible";
+  collapsible.append(controls, volumeRow);
+
+  card.append(header, main, progress, collapsible, mount);
 
   readOnlyYtCardRefs.set(item.id, { pill, fill, elapsedEl, durationEl, playBtn, mount, volumeIcon });
   initReadOnlyYoutubePlayer(item);
@@ -463,6 +482,7 @@ function renderReadOnlyCanvas(entry) {
   } else {
     canvas.style.backgroundImage = entry.canvasBg ? "none" : "";
   }
+  canvas.classList.toggle("custom-bg", !!(entry.canvasBg || entry.canvasBgImage));
 
   let maxBottom = CANVAS_UNIT_HEIGHT;
   for (const item of entry.items || []) {
@@ -474,7 +494,7 @@ function renderReadOnlyCanvas(entry) {
     wrap.style.zIndex = item.z;
     wrap.style.transform = `translate(-50%, -50%) rotate(${item.rot}deg)`;
 
-    if (item.type !== "text") {
+    if (item.type !== "text" && !(item.type === "photo" && item.tape === false)) {
       const washi = document.createElement("div");
       washi.className = "washi";
       washi.style.background = item.color;

@@ -216,6 +216,12 @@ body {
   box-shadow: inset 0 0 60px rgba(120, 95, 55, 0.18);
 }
 
+/* A custom background color/image (see applyCanvasBackground) should render
+   flat, not shaded by the default look's paper vignette. */
+.scrapbook-canvas.custom-bg {
+  box-shadow: none;
+}
+
 .canvas-empty {
   position: absolute;
   z-index: 1;
@@ -280,6 +286,11 @@ body {
   box-shadow: 0 6px 14px rgba(60, 45, 20, 0.25);
 }
 
+.polaroid.no-shadow,
+.plain-photo-img.no-shadow {
+  box-shadow: none;
+}
+
 /* Frameless items (a "none"-frame photo, or any text box) have no card
    background of their own to show their bounds, so give them a light
    dashed outline while selected — otherwise a floating text box would be
@@ -320,11 +331,17 @@ body {
   font-family: "Lora", serif;
 }
 
+.yt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 12px;
+}
+
 .yt-pill {
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  margin: 0 0 12px;
   padding: 4px 12px;
   background: rgba(243, 235, 218, 0.14);
   border-radius: 999px;
@@ -334,6 +351,26 @@ body {
 }
 
 .yt-pill.playing { color: #a8e6b0; }
+
+.yt-collapse-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #cbb994;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  transition: transform 0.15s ease;
+}
+
+/* Rotated 180° rather than swapping the glyph, so the chevron always points
+   "toward" whichever state a click will produce. */
+.yt-player-card.collapsed .yt-collapse-btn { transform: rotate(180deg); }
+
+/* Controls + volume — the progress bar stays visible either way, since
+   that's the part worth seeing even with the card collapsed. */
+.yt-player-card.collapsed .yt-collapsible { display: none; }
 
 .yt-main {
   display: flex;
