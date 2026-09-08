@@ -19,6 +19,25 @@ const WASHI_COLORS = ["#c98a6b", "#8c9b74", "#9b7fa6", "#c9a15a"];
 // vertical position shifting each time it grows — see growCanvasToFitContent.
 const CANVAS_UNIT_HEIGHT = 560;
 
+// A "bangarang" item flickers between two uploaded images forever, at a
+// speed the delay slider on its bar controls — floor keeps setInterval from
+// spinning absurdly fast, ceiling is the "max 1 second" the feature asks for.
+const BANGARANG_MIN_DELAY = 30;
+const BANGARANG_MAX_DELAY = 1000;
+const BANGARANG_DEFAULT_DELAY = 150;
+
+/**
+ * @param {number} ms
+ * @returns {number} `ms` clamped to [BANGARANG_MIN_DELAY, BANGARANG_MAX_DELAY],
+ *   falling back to BANGARANG_DEFAULT_DELAY for anything not a positive number
+ *   (e.g. a hand-edited or missing entry.json field).
+ */
+function clampBangarangDelay(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return BANGARANG_DEFAULT_DELAY;
+  return Math.min(BANGARANG_MAX_DELAY, Math.max(BANGARANG_MIN_DELAY, n));
+}
+
 // Selectable fonts for note/caption text, keyed by a short name stored on
 // the item (item.font) and mapped to an actual CSS font-family here.
 const FONT_OPTIONS = [
@@ -78,7 +97,135 @@ const CHEAT_SHEET = [
   [".washi", "the tape strip on each item"],
   [".entry-card", "each entry on the home page"],
   [".yt-player-card", "the music player card"],
+  [".bangarang-frame", "the box around a bangarang's two images"],
+  [".bangarang-img", "each of a bangarang's two stacked images"],
 ];
+
+// ---------- password protection: crypto ----------
+// A password-protected entry's `items`/`canvasBg`/`canvasBgImage` are never
+// written to disk in plaintext: instead entry.enc holds them AES-GCM
+// encrypted with a key derived from the password via PBKDF2, and entry.locked
+// is just a display flag. This has to work with no server involved at all —
+// the static GitHub Pages export (see scripts/static-site/static.js, which
+// mirrors this section) has none — so it's built entirely on the browser's
+// native SubtleCrypto rather than a server-side check. A wrong password isn't
+// verified separately: AES-GCM's built-in authentication tag makes decrypt()
+// itself throw, and that failure *is* the "wrong password" signal.
+const PBKDF2_ITERATIONS = 200000;
+
+/** @param {ArrayBuffer|Uint8Array} bytes @returns {string} base64 */
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const b of new Uint8Array(bytes)) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+/** @param {string} str - base64 @returns {Uint8Array} */
+function base64ToBytes(str) {
+  const binary = atob(str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * @param {string} password
+ * @param {Uint8Array} salt
+ * @returns {Promise<CryptoKey>}
+ */
+async function deriveEntryKey(password, salt) {
+  const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+/**
+ * Encrypt a locked entry's protected fields, ready to store as entry.enc.
+ * @param {string} password
+ * @param {object} payload - `{items, canvasBg, canvasBgImage}`, with any
+ *   photo URLs already made portable (see absoluteImgToPortable) so the
+ *   ciphertext doesn't hardcode which host/context it's decrypted in.
+ * @returns {Promise<{v: number, salt: string, iv: string, data: string}>}
+ */
+async function encryptEntryPayload(password, payload) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveEntryKey(password, salt);
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
+  return { v: 1, salt: bytesToBase64(salt), iv: bytesToBase64(iv), data: bytesToBase64(cipher) };
+}
+
+/**
+ * Try to decrypt entry.enc with a candidate password.
+ * @param {string} password
+ * @param {{salt: string, iv: string, data: string}} enc
+ * @returns {Promise<object|null>} The decrypted `{items, canvasBg,
+ *   canvasBgImage}` payload, or null if the password was wrong.
+ */
+async function decryptEntryPayload(password, enc) {
+  try {
+    const key = await deriveEntryKey(password, base64ToBytes(enc.salt));
+    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(enc.iv) }, key, base64ToBytes(enc.data));
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    return null; // wrong password (or corrupt data) — the AES-GCM auth tag failed
+  }
+}
+
+/**
+ * A photo item's/canvasBgImage's URL is stored as an absolute,
+ * server-rooted path (/entries/<id>/uploads/<file>) everywhere else in this
+ * app, but that's meaningless once decrypted somewhere with no server (the
+ * static export) — so encrypted payloads store just the entry-relative
+ * `uploads/<file>` tail instead, and each context re-prefixes it however it
+ * needs to at render time (see portableImgToAbsolute here, and
+ * portableImgToRelative in static.js).
+ * @param {string} url
+ * @returns {string}
+ */
+function absoluteImgToPortable(url) {
+  return `uploads/${url.split("/uploads/").pop()}`;
+}
+
+/**
+ * @param {string} entryId
+ * @param {string} portable - As produced by absoluteImgToPortable.
+ * @returns {string} The absolute, server-rooted URL this app renders elsewhere.
+ */
+function portableImgToAbsolute(entryId, portable) {
+  return `/entries/${entryId}/${portable}`;
+}
+
+/**
+ * Apply absoluteImgToPortable to whichever image URL field(s) an item
+ * actually has (a photo's `img`, or a bangarang's `img1`/`img2`) — used when
+ * building a protected entry's payload to encrypt.
+ * @param {object} item
+ * @returns {object}
+ */
+function itemImagesToPortable(item) {
+  if (item.type === "photo" && item.img) return { ...item, img: absoluteImgToPortable(item.img) };
+  if (item.type === "bangarang") return { ...item, img1: absoluteImgToPortable(item.img1), img2: absoluteImgToPortable(item.img2) };
+  return item;
+}
+
+/**
+ * The reverse of itemImagesToPortable, run on a just-decrypted payload.
+ * @param {string} entryId
+ * @param {object} item
+ * @returns {object}
+ */
+function itemImagesToAbsolute(entryId, item) {
+  if (item.type === "photo" && item.img) return { ...item, img: portableImgToAbsolute(entryId, item.img) };
+  if (item.type === "bangarang") return { ...item, img1: portableImgToAbsolute(entryId, item.img1), img2: portableImgToAbsolute(entryId, item.img2) };
+  return item;
+}
 
 /** Shorthand for document.getElementById, used everywhere UI code needs a DOM node. */
 const el = (id) => document.getElementById(id);
@@ -106,6 +253,13 @@ let saveEntryTimer = null; // debounce timer id for scheduleSaveEntry
 let saveCssTimer = null; // debounce timer id for scheduleSaveCss
 let zCounter = 10; // monotonically increasing z-index source for canvas items
 let dragInfo = null; // in-progress drag/rotate state, or null when idle
+
+// The password for the currently-open entry, held only in memory for as long
+// as it stays open and unlocked this session — used to re-encrypt on every
+// autosave (see scheduleSaveEntry) so a protected entry's edits never touch
+// disk as plaintext. Never sent to the server itself, only the ciphertext it
+// produces. Reset to null in openEntry and whenever protection is removed.
+let activeEntryPassword = null;
 
 /**
  * @param {number} ts - Unix ms timestamp.
@@ -197,12 +351,19 @@ function renderEntriesGrid() {
     });
 
     const thumb = document.createElement("div");
-    thumb.className = "entry-thumb";
-    if (en.previewUrl) {
+    // A locked entry's content (including any photo) never left the server
+    // as plaintext, so there's no previewUrl to show \u2014 a badge instead, same
+    // as the "no photo" placeholder.
+    if (en.locked) {
+      thumb.className = "entry-thumb locked";
+      thumb.textContent = "\ud83d\udd12";
+    } else if (en.previewUrl) {
+      thumb.className = "entry-thumb";
       const img = document.createElement("img");
       img.src = en.previewUrl;
       thumb.appendChild(img);
     } else {
+      thumb.className = "entry-thumb";
       thumb.textContent = "no photo";
     }
 
@@ -212,7 +373,9 @@ function renderEntriesGrid() {
 
     const meta = document.createElement("div");
     meta.className = "entry-card-meta diary-date";
-    meta.textContent = `${formatDate(en.date)} \u00b7 ${en.itemCount} item${en.itemCount === 1 ? "" : "s"}`;
+    meta.textContent = en.locked
+      ? `${formatDate(en.date)} \u00b7 protected`
+      : `${formatDate(en.date)} \u00b7 ${en.itemCount} item${en.itemCount === 1 ? "" : "s"}`;
 
     card.append(del, thumb, title, meta);
     grid.appendChild(card);
@@ -244,31 +407,64 @@ async function openEntry(id) {
   if (!res.ok) return;
   resetCanvasState();
   state.activeEntry = await res.json();
+  activeEntryPassword = null;
   state.selectedItemIds.clear();
-  zCounter = Math.max(10, ...(state.activeEntry.items || []).map((it) => it.z || 0)) + 1;
   el("entry-title-input").value = state.activeEntry.title;
   el("entry-date").textContent = formatDate(state.activeEntry.date);
-  applyCanvasBackground();
-  renderCanvas();
   showView("entry");
+  if (state.activeEntry.locked) {
+    showEntryLockGate();
+  } else {
+    zCounter = Math.max(10, ...(state.activeEntry.items || []).map((it) => it.z || 0)) + 1;
+    setEntryToolbarEnabled(true);
+    el("entry-lock-gate").hidden = true;
+    applyCanvasBackground();
+    renderCanvas();
+  }
+  updateLockButton();
+}
+
+/**
+ * Build the `{items, canvasBg, canvasBgImage}` payload that gets AES-GCM
+ * encrypted into entry.enc for a protected entry \u2014 same shape
+ * decryptEntryPayload hands back, with photo URLs made portable first (see
+ * absoluteImgToPortable).
+ * @param {object} entry - state.activeEntry, already decrypted/editable.
+ * @returns {object}
+ */
+function buildProtectedPayload(entry) {
+  return {
+    items: (entry.items || []).map(itemImagesToPortable),
+    canvasBg: entry.canvasBg,
+    canvasBgImage: entry.canvasBgImage ? absoluteImgToPortable(entry.canvasBgImage) : undefined,
+  };
 }
 
 /**
  * Debounced autosave for the currently open entry: waits 500ms after the
- * last call before PUTting title/date/items/canvasBg to the server, so
- * rapid edits (typing, dragging) collapse into one request instead of one
- * per keystroke. Every mutation to state.activeEntry should call this
- * afterward. Updates the "saving\u2026"/"saved" indicator around the request.
+ * last call before PUTting to the server, so rapid edits (typing, dragging)
+ * collapse into one request instead of one per keystroke. Every mutation to
+ * state.activeEntry should call this afterward. Updates the
+ * "saving\u2026"/"saved" indicator around the request.
+ *
+ * For a protected entry this re-encrypts `items`/`canvasBg`/`canvasBgImage`
+ * with the in-memory activeEntryPassword on every save (not just when the
+ * password is first set), and sends those plaintext fields as cleared \u2014
+ * so an in-progress edit never touches disk unencrypted, and a stale
+ * plaintext copy from before it was locked can't linger either.
  */
 function scheduleSaveEntry() {
   setSaveIndicator("saving\u2026");
   clearTimeout(saveEntryTimer);
   saveEntryTimer = setTimeout(async () => {
-    const { id, title, date, items, canvasBg, canvasBgImage } = state.activeEntry;
+    const { id, title, date, locked } = state.activeEntry;
+    const body = locked
+      ? { title, date, locked: true, enc: (state.activeEntry.enc = await encryptEntryPayload(activeEntryPassword, buildProtectedPayload(state.activeEntry))), items: [], canvasBg: null, canvasBgImage: null }
+      : { title, date, locked: false, enc: null, items: state.activeEntry.items, canvasBg: state.activeEntry.canvasBg, canvasBgImage: state.activeEntry.canvasBgImage };
     await fetch(`/api/entries/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, date, items, canvasBg, canvasBgImage }),
+      body: JSON.stringify(body),
     });
     setSaveIndicator("saved");
   }, 500);
@@ -278,6 +474,241 @@ el("entry-title-input").addEventListener("input", (e) => {
   state.activeEntry.title = e.target.value;
   scheduleSaveEntry();
 });
+
+// ---------- password protection: UI ----------
+
+/**
+ * Enable/disable everything in the entry toolbar except the back button
+ * while a protected entry's canvas is gated behind its password prompt (see
+ * showEntryLockGate) \u2014 there's nothing valid to add notes/photos to, or a
+ * title to save alongside, until it's been decrypted into state.activeEntry.
+ * @param {boolean} enabled
+ */
+function setEntryToolbarEnabled(enabled) {
+  for (const id of ["entry-title-input", "add-note-btn", "add-photo-btn", "add-text-btn", "add-music-btn", "publish-btn"]) {
+    el(id).disabled = !enabled;
+  }
+}
+
+/**
+ * Reflect whether the open entry is protected on the toolbar's lock button.
+ * Hidden entirely while a protected entry is still gated (nothing to change
+ * yet \u2014 see showEntryLockGate), since there's no password in memory to
+ * re-encrypt with until the right one has been entered once.
+ */
+function updateLockButton() {
+  const entry = state.activeEntry;
+  const btn = el("lock-btn");
+  if (!entry) return;
+  btn.hidden = entry.locked && !activeEntryPassword;
+  btn.textContent = entry.locked ? "\ud83d\udd12 Protected" : "\ud83d\udd13 Protect";
+  btn.title = entry.locked ? "Change or remove this entry's password" : "Password protect this entry";
+}
+
+/**
+ * Render an inline "enter password to continue" gate into `container`,
+ * replacing whatever it currently shows. Shared between the editor's locked
+ * canvas, the live app's /view/<id> page, and the static export \u2014 each just
+ * supplies its own onSubmit that tries decryptEntryPayload and, on success,
+ * re-renders `container` with the real content (which naturally clears the
+ * gate, since it's the same element).
+ * @param {HTMLElement} container
+ * @param {(password: string) => Promise<boolean>} onSubmit - Resolves true
+ *   on a correct password (caller has already re-rendered `container`),
+ *   false on a wrong one (the gate stays up and shows an error).
+ */
+function renderPasswordGate(container, onSubmit) {
+  container.innerHTML = "";
+  container.classList.add("password-gate");
+
+  const icon = document.createElement("div");
+  icon.className = "lock-icon";
+  icon.textContent = "\ud83d\udd12";
+
+  const label = document.createElement("div");
+  label.className = "diary-date";
+  label.textContent = "This entry is password protected.";
+
+  const form = document.createElement("form");
+  const input = document.createElement("input");
+  input.type = "password";
+  input.placeholder = "Password";
+  input.autocomplete = "current-password";
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "submit";
+  submitBtn.className = "btn btn-accent";
+  submitBtn.textContent = "Unlock";
+  form.append(input, submitBtn);
+
+  const error = document.createElement("div");
+  error.className = "password-error";
+
+  container.append(icon, label, form, error);
+  input.focus();
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!input.value) return;
+    input.disabled = true;
+    submitBtn.disabled = true;
+    error.textContent = "";
+    const ok = await onSubmit(input.value);
+    if (!ok) {
+      error.textContent = "Incorrect password.";
+      input.disabled = false;
+      submitBtn.disabled = false;
+      input.value = "";
+      input.focus();
+    }
+  });
+}
+
+/**
+ * Show the password gate in place of the editor's canvas for a protected
+ * entry that hasn't been unlocked yet this session. On a correct password,
+ * decrypts entry.enc into state.activeEntry's editable fields (converting
+ * photo URLs back from their portable form), remembers the password in
+ * activeEntryPassword for scheduleSaveEntry to re-encrypt with, and switches
+ * over to the normal editable canvas.
+ */
+function showEntryLockGate() {
+  setEntryToolbarEnabled(false);
+  el("canvas-empty").hidden = true;
+  el("canvas").hidden = true;
+  el("entry-lock-gate").hidden = false;
+  renderPasswordGate(el("entry-lock-gate"), async (password) => {
+    const decrypted = await decryptEntryPayload(password, state.activeEntry.enc);
+    if (!decrypted) return false;
+    const entryId = state.activeEntry.id;
+    state.activeEntry.items = (decrypted.items || []).map((it) => itemImagesToAbsolute(entryId, it));
+    state.activeEntry.canvasBg = decrypted.canvasBg;
+    state.activeEntry.canvasBgImage = decrypted.canvasBgImage ? portableImgToAbsolute(entryId, decrypted.canvasBgImage) : undefined;
+    activeEntryPassword = password;
+    zCounter = Math.max(10, ...state.activeEntry.items.map((it) => it.z || 0)) + 1;
+    el("entry-lock-gate").hidden = true;
+    el("canvas").hidden = false;
+    setEntryToolbarEnabled(true);
+    applyCanvasBackground();
+    renderCanvas();
+    updateLockButton();
+    return true;
+  });
+}
+
+/**
+ * (Re-)encrypt the open entry's current content with `password` and mark it
+ * protected \u2014 used both to protect a previously-open entry for the first
+ * time and to change an already-protected one's password (it's the same
+ * operation: re-encrypt what's currently in state.activeEntry).
+ * @param {string} password
+ * @returns {Promise<void>}
+ */
+async function lockActiveEntry(password) {
+  const entry = state.activeEntry;
+  entry.enc = await encryptEntryPayload(password, buildProtectedPayload(entry));
+  entry.locked = true;
+  activeEntryPassword = password;
+  updateLockButton();
+  scheduleSaveEntry();
+}
+
+/** Strip password protection from the open entry, saving it in the open like any other. */
+function removeActiveEntryProtection() {
+  const entry = state.activeEntry;
+  entry.locked = false;
+  entry.enc = null;
+  activeEntryPassword = null;
+  updateLockButton();
+  scheduleSaveEntry();
+}
+
+/**
+ * Open the modal for setting a new password on the open entry, changing its
+ * existing one, or (if already protected) removing protection entirely.
+ * Self-contained, same overlay/card structure as openCropModal.
+ */
+function openPasswordModal() {
+  const entry = state.activeEntry;
+  const isProtected = !!entry.locked;
+
+  const overlay = document.createElement("div");
+  overlay.className = "crop-overlay";
+  const modal = document.createElement("div");
+  modal.className = "crop-modal password-modal";
+
+  const heading = document.createElement("div");
+  heading.className = "crop-heading";
+  heading.textContent = isProtected ? "Change password" : "Protect this entry";
+
+  const newInput = document.createElement("input");
+  newInput.type = "password";
+  newInput.placeholder = "New password";
+  newInput.autocomplete = "new-password";
+  const confirmInput = document.createElement("input");
+  confirmInput.type = "password";
+  confirmInput.placeholder = "Confirm password";
+  confirmInput.autocomplete = "new-password";
+
+  const error = document.createElement("div");
+  error.className = "password-error";
+
+  const actions = document.createElement("div");
+  actions.className = "crop-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "btn";
+  cancelBtn.textContent = "Cancel";
+  const submitBtn = document.createElement("button");
+  submitBtn.className = "btn btn-accent";
+  submitBtn.textContent = isProtected ? "Save" : "Protect";
+  actions.append(cancelBtn, submitBtn);
+
+  modal.append(heading, newInput, confirmInput, error, actions);
+
+  if (isProtected) {
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "btn password-remove-btn";
+    removeBtn.textContent = "Remove password protection";
+    removeBtn.addEventListener("click", () => {
+      if (!confirm("Remove password protection from this entry? It'll be saved in the open, like any other entry.")) return;
+      removeActiveEntryProtection();
+      cleanup();
+    });
+    modal.appendChild(removeBtn);
+  }
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  newInput.focus();
+
+  function cleanup() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKeydown);
+  }
+  function onKeydown(e) {
+    if (e.key === "Escape") cleanup();
+  }
+  document.addEventListener("keydown", onKeydown);
+  cancelBtn.addEventListener("click", cleanup);
+  overlay.addEventListener("pointerdown", (e) => {
+    if (e.target === overlay) cleanup();
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    if (!newInput.value) {
+      error.textContent = "Enter a password.";
+      return;
+    }
+    if (newInput.value !== confirmInput.value) {
+      error.textContent = "Passwords don't match.";
+      return;
+    }
+    submitBtn.disabled = true;
+    await lockActiveEntry(newInput.value);
+    cleanup();
+  });
+}
+
+el("lock-btn").addEventListener("click", () => openPasswordModal());
 
 /**
  * Compute a canvas position (%) for the center of whatever part of the
@@ -346,6 +777,64 @@ function createTextItem(pos) {
 }
 el("add-text-btn").addEventListener("click", () => createTextItem(getViewportCenterCanvasPos()));
 
+// ---------- HEIC conversion ----------
+// iPhones save Camera Roll photos as HEIC by default, which every browser
+// except Safari flatly refuses to decode in an <img> — pick one as-is and it
+// silently renders as a black box with a broken-image icon everywhere in
+// this app (the crop preview, a bangarang, a drag/paste photo), with no
+// error anywhere to explain why. Every image-intake path below converts one
+// to a normal JPEG first, so from that point on it's just a normal image.
+
+let heic2anyPromise = null; // memoized so the <script> tag is only ever injected once
+
+/**
+ * Lazily load heic2any (a WASM HEIC/HEIF-to-JPEG decoder) from a CDN — same
+ * on-demand-script pattern as loadYoutubeApi, since most uploads are never
+ * HEIC and this is a ~1.3MB script nobody should pay for otherwise.
+ * @returns {Promise<Function>} The global `heic2any` conversion function.
+ */
+function loadHeic2Any() {
+  if (heic2anyPromise) return heic2anyPromise;
+  heic2anyPromise = new Promise((resolve, reject) => {
+    if (window.heic2any) {
+      resolve(window.heic2any);
+      return;
+    }
+    const tag = document.createElement("script");
+    tag.src = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";
+    tag.onload = () => resolve(window.heic2any);
+    tag.onerror = () => reject(new Error("Couldn't load the HEIC converter."));
+    document.head.appendChild(tag);
+  });
+  return heic2anyPromise;
+}
+
+/**
+ * @param {File|Blob} file - May lack a `.name` (e.g. a cross-origin-fetched
+ *   drag-drop blob), so this never relies on that alone.
+ * @returns {boolean}
+ */
+function looksLikeHeic(file) {
+  const type = (file.type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  return type === "image/heic" || type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif");
+}
+
+/**
+ * Convert a HEIC/HEIF file to a normal JPEG File before it reaches the crop
+ * modal or an upload — a no-op (returns `file` unchanged) for anything else.
+ * @param {File|Blob} file
+ * @returns {Promise<File|Blob>}
+ */
+async function convertHeicIfNeeded(file) {
+  if (!looksLikeHeic(file)) return file;
+  const heic2any = await loadHeic2Any();
+  const result = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.9 });
+  const jpegBlob = Array.isArray(result) ? result[0] : result; // a multi-picture HEIC (e.g. Live Photo) decodes to several — just use the first
+  const baseName = (file.name || "photo").replace(/\.\w+$/, "");
+  return new File([jpegBlob], `${baseName}.jpg`, { type: "image/jpeg" });
+}
+
 // Where a photo picked via triggerPhotoPick() should be placed once the user
 // finishes the file-picker + crop-modal flow. Stashed here because the
 // browser's file input is a single shared, stateless element.
@@ -365,13 +854,20 @@ el("add-photo-btn").addEventListener("click", () => triggerPhotoPick(getViewport
 // Fires once the user picks a file (or cancels) from the native dialog
 // opened by triggerPhotoPick(). Hands the file off to the crop modal rather
 // than uploading it directly.
-el("photo-file-input").addEventListener("change", (e) => {
+el("photo-file-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   const pos = pendingPhotoPos;
   pendingPhotoPos = null;
   e.target.value = "";
   if (!file) return;
-  openCropModal(file, pos);
+  let usable;
+  try {
+    usable = await convertHeicIfNeeded(file);
+  } catch {
+    alert("Couldn't read that HEIC photo — try exporting it as JPEG first.");
+    return;
+  }
+  openCropModal(usable, pos);
 });
 
 /**
@@ -404,6 +900,202 @@ async function uploadCroppedPhoto(blob, pos) {
   scheduleSaveEntry();
 }
 
+// ---------- bangarang (two-image flicker loop) ----------
+
+/**
+ * Open a small modal with two "choose image" slots and an Add button
+ * (enabled once both are filled), then upload both and add the bangarang
+ * item on confirm. Deliberately not a single `<input multiple>` file
+ * picker: relying on the user knowing to ⌘/Ctrl-click two files in one
+ * dialog trip is easy to miss, and chaining a *second* programmatic
+ * `.click()` on a file input after an `await` (i.e. after the first
+ * upload finishes) risks landing outside the browser's transient
+ * user-activation window and getting silently blocked — no dialog opens,
+ * no error, item never gets created. Two buttons, each opening its own
+ * input from a direct, synchronous click, sidesteps both problems.
+ * @param {{x: number, y: number}} pos - Target canvas position (%).
+ */
+function openBangarangModal(pos) {
+  const overlay = document.createElement("div");
+  overlay.className = "crop-overlay";
+  const modal = document.createElement("div");
+  modal.className = "crop-modal bangarang-modal";
+
+  const heading = document.createElement("div");
+  heading.className = "crop-heading";
+  heading.textContent = "⚡ Bangarang";
+
+  const sub = document.createElement("div");
+  sub.className = "bangarang-modal-sub";
+  sub.textContent = "Pick two images to flicker between.";
+
+  const slotsRow = document.createElement("div");
+  slotsRow.className = "bangarang-slots-row";
+
+  const files = [null, null];
+
+  /**
+   * @param {string} label
+   * @returns {{el: HTMLElement, input: HTMLInputElement, setPreview: (file: File) => void, setBusy: (busy: boolean) => void}}
+   */
+  function createSlot(label) {
+    const slotEl = document.createElement("div");
+    slotEl.className = "bangarang-slot";
+
+    const preview = document.createElement("div");
+    preview.className = "bangarang-slot-preview";
+    preview.textContent = "+";
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.hidden = true;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn";
+    btn.textContent = label;
+    btn.addEventListener("click", () => input.click());
+
+    slotEl.append(preview, input, btn);
+
+    let currentLabel = label; // what setBusy(false) restores the button to
+    return {
+      el: slotEl,
+      input,
+      setPreview(file) {
+        preview.style.backgroundImage = `url("${URL.createObjectURL(file)}")`;
+        preview.textContent = "";
+        currentLabel = "Change";
+        btn.textContent = currentLabel;
+      },
+      // Shown while a HEIC pick is being converted (see wireSlot) — that can
+      // take a moment for a large photo, and there's otherwise no feedback
+      // that anything is happening between picking it and the preview appearing.
+      setBusy(busy) {
+        btn.disabled = busy;
+        btn.textContent = busy ? "Converting…" : currentLabel;
+      },
+    };
+  }
+
+  const slot1 = createSlot("Choose first image");
+  const slot2 = createSlot("Choose second image");
+  slotsRow.append(slot1.el, slot2.el);
+
+  const error = document.createElement("div");
+  error.className = "password-error"; // same small red-text treatment
+
+  const actions = document.createElement("div");
+  actions.className = "crop-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "btn";
+  cancelBtn.textContent = "Cancel";
+  const addBtn = document.createElement("button");
+  addBtn.className = "btn btn-teal";
+  addBtn.textContent = "Add";
+  addBtn.disabled = true;
+  actions.append(cancelBtn, addBtn);
+
+  modal.append(heading, sub, slotsRow, error, actions);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  function wireSlot(slot, index) {
+    slot.input.addEventListener("change", async () => {
+      const file = slot.input.files[0];
+      if (!file) return;
+      slot.setBusy(true);
+      let usable;
+      try {
+        usable = await convertHeicIfNeeded(file);
+      } catch {
+        error.textContent = "Couldn't read that HEIC photo — try exporting it as JPEG first.";
+        slot.setBusy(false);
+        return;
+      }
+      slot.setBusy(false);
+      files[index] = usable;
+      slot.setPreview(usable);
+      addBtn.disabled = !(files[0] && files[1]);
+    });
+  }
+  wireSlot(slot1, 0);
+  wireSlot(slot2, 1);
+
+  function cleanup() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKeydown);
+  }
+  function onKeydown(e) {
+    if (e.key === "Escape") cleanup();
+  }
+  document.addEventListener("keydown", onKeydown);
+  cancelBtn.addEventListener("click", cleanup);
+  overlay.addEventListener("pointerdown", (e) => {
+    if (e.target === overlay) cleanup();
+  });
+
+  addBtn.addEventListener("click", async () => {
+    addBtn.disabled = true;
+    addBtn.textContent = "Adding…";
+    error.textContent = "";
+    const [url1, url2] = await Promise.all([uploadRawImage(files[0]), uploadRawImage(files[1])]);
+    if (!url1 || !url2) {
+      error.textContent = "Couldn't upload one of those images — try again.";
+      addBtn.disabled = false;
+      addBtn.textContent = "Add";
+      return;
+    }
+    addBangarangItem(pos, url1, url2);
+    cleanup();
+  });
+}
+el("add-bangarang-btn").addEventListener("click", () => openBangarangModal(getViewportCenterCanvasPos()));
+
+/**
+ * Upload a raw, uncropped image file to the current entry's uploads folder
+ * (no square-crop modal, unlike uploadCroppedPhoto — a bangarang just needs
+ * two source images, not a polaroid-shaped one).
+ * @param {File} file
+ * @returns {Promise<string|null>} The stored URL, or null on failure.
+ */
+async function uploadRawImage(file) {
+  const form = new FormData();
+  form.append("photo", file, file.name || "photo.jpg");
+  const res = await fetch(`/api/entries/${state.activeEntry.id}/uploads`, { method: "POST", body: form });
+  if (!res.ok) return null;
+  const { url } = await res.json();
+  return url;
+}
+
+/**
+ * Add a new bangarang item: an image that flickers between `img1` and
+ * `img2` forever at `delay`ms, adjustable afterward via its bar's slider
+ * (see createBangarangBar) up to BANGARANG_MAX_DELAY.
+ * @param {{x: number, y: number}} pos - Target canvas position (%).
+ * @param {string} img1
+ * @param {string} img2
+ */
+function addBangarangItem(pos, img1, img2) {
+  const item = {
+    id: `bangarang-${Date.now()}`,
+    type: "bangarang",
+    x: pos.x,
+    y: pos.y,
+    rot: Math.round((Math.random() * 8 - 4) * 10) / 10,
+    w: 200,
+    img1,
+    img2,
+    delay: BANGARANG_DEFAULT_DELAY,
+    color: WASHI_COLORS[Math.floor(Math.random() * WASHI_COLORS.length)],
+    z: ++zCounter,
+  };
+  state.activeEntry.items.push(item);
+  renderCanvas();
+  scheduleSaveEntry();
+}
+
 // ---------- paste & drag-and-drop photos ----------
 // A second, lighter-weight way to add a photo, alongside the +Photo
 // button's deliberate crop-to-square-polaroid flow: pasting an image
@@ -425,8 +1117,15 @@ async function uploadCroppedPhoto(blob, pos) {
  */
 async function handleIncomingImage(blob, pos) {
   if (!state.activeEntry || !blob || !blob.type || !blob.type.startsWith("image/")) return;
+  let usable;
+  try {
+    usable = await convertHeicIfNeeded(blob);
+  } catch {
+    alert("Couldn't read that HEIC photo — try exporting it as JPEG first.");
+    return;
+  }
   const form = new FormData();
-  form.append("photo", blob, blob.name || "photo.jpg");
+  form.append("photo", usable, usable.name || "photo.jpg");
   const res = await fetch(`/api/entries/${state.activeEntry.id}/uploads`, { method: "POST", body: form });
   if (!res.ok) return;
   const { url } = await res.json();
@@ -1115,17 +1814,56 @@ function bringToFront(id) {
 const itemElCache = new Map(); // item.id -> wrap element
 const textElRefs = new Map(); // item.id -> the note/text-box editor or caption input element
 const noteCardRefs = new Map(); // item.id -> the .note-card element (notes only)
-const resizableElRefs = new Map(); // item.id -> the element item.h should be applied to (photo/text only)
+const resizableElRefs = new Map(); // item.id -> the element item.h should be applied to (photo/text/bangarang only)
+const bangarangTimers = new Map(); // item.id -> setInterval id driving its flicker (bangarang only)
+
+/**
+ * Start (or restart, e.g. after the delay slider changes) a bangarang
+ * item's flicker: toggles which of its two already-loaded `<img>` elements
+ * is visible, forever. Both images are real DOM elements loaded once up
+ * front (see createBangarangCard) rather than one `<img>` whose `src` gets
+ * swapped every tick — swapping `src` would mean every single flip refetches
+ * and redecodes a full-size image, which for anything bigger than a tiny
+ * demo photo (e.g. a real 1920x1080 one) can't keep up with a fast delay at
+ * all: the image just never finishes loading before the next swap fires,
+ * so it visually never shows. Toggling opacity between two pre-loaded
+ * elements is instant regardless of source image size or flicker speed.
+ * @param {object} item
+ * @param {HTMLImageElement} img1
+ * @param {HTMLImageElement} img2
+ */
+function startBangarangTimer(item, img1, img2) {
+  stopBangarangTimer(item.id);
+  let showingFirst = true;
+  bangarangTimers.set(
+    item.id,
+    setInterval(() => {
+      showingFirst = !showingFirst;
+      img1.style.opacity = showingFirst ? "1" : "0";
+      img2.style.opacity = showingFirst ? "0" : "1";
+    }, clampBangarangDelay(item.delay))
+  );
+}
+
+/** @param {string} id - Item id. */
+function stopBangarangTimer(id) {
+  const timer = bangarangTimers.get(id);
+  if (timer) {
+    clearInterval(timer);
+    bangarangTimers.delete(id);
+  }
+}
 
 /**
  * Tear down everything owned by the currently-open entry's canvas: destroy
- * any live YouTube players, clear the item DOM/ref caches, wipe the canvas
- * element, and close any open right-click menu. Called before loading a
- * different entry (or leaving to the list view) so nothing from the
- * previous entry lingers — including background audio.
+ * any live YouTube players and bangarang timers, clear the item DOM/ref
+ * caches, wipe the canvas element, and close any open right-click menu.
+ * Called before loading a different entry (or leaving to the list view) so
+ * nothing from the previous entry lingers — including background audio.
  */
 function resetCanvasState() {
   for (const id of [...ytPlayers.keys()]) destroyYoutubePlayer(id);
+  for (const id of [...bangarangTimers.keys()]) stopBangarangTimer(id);
   itemElCache.clear();
   textElRefs.clear();
   noteCardRefs.clear();
@@ -1939,6 +2677,86 @@ function createNoteBgBar(item) {
 }
 
 /**
+ * Build a bangarang item's visual content: a fixed-size frame holding both
+ * of its images stacked on top of each other (each `object-fit: cover`, so
+ * a mismatched pair doesn't make the box jump size on every flip), with
+ * only one visible at a time via opacity — see startBangarangTimer for why
+ * that's two pre-loaded elements rather than one `<img>` whose `src` gets
+ * swapped. The frame (not either image) is registered in resizableElRefs,
+ * so the resize handle stretches the whole box, same as a photo.
+ *
+ * The flicker itself doesn't start until the second image has actually
+ * finished loading, so the first flip never lands on a still-blank `<img>`.
+ * @param {object} item - The bangarang-type canvas item.
+ * @returns {HTMLElement} The `.bangarang-frame` element.
+ */
+function createBangarangCard(item) {
+  const frame = document.createElement("div");
+  frame.className = "bangarang-frame";
+
+  const img1 = document.createElement("img");
+  img1.className = "bangarang-img bangarang-img-front";
+  img1.src = item.img1;
+  img1.draggable = false;
+
+  const img2 = document.createElement("img");
+  img2.className = "bangarang-img bangarang-img-back";
+  img2.src = item.img2;
+  img2.draggable = false;
+
+  frame.append(img1, img2);
+  resizableElRefs.set(item.id, frame);
+
+  if (img2.complete) startBangarangTimer(item, img1, img2);
+  else img2.addEventListener("load", () => startBangarangTimer(item, img1, img2), { once: true });
+
+  return frame;
+}
+
+/**
+ * The per-item bar for a selected bangarang: just its flicker-speed slider
+ * (0.03–1s, per BANGARANG_MIN_DELAY/MAX_DELAY), live-updating both the
+ * running timer and the ms label as it's dragged.
+ * @param {object} item
+ * @returns {HTMLElement}
+ */
+function createBangarangBar(item) {
+  const bar = document.createElement("div");
+  bar.className = "item-bangarang-bar";
+
+  const icon = document.createElement("span");
+  icon.className = "bangarang-bar-icon";
+  icon.textContent = "⚡";
+  icon.title = "Flicker delay";
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.className = "bangarang-delay-slider";
+  slider.min = String(BANGARANG_MIN_DELAY);
+  slider.max = String(BANGARANG_MAX_DELAY);
+  slider.step = "10";
+  slider.value = String(clampBangarangDelay(item.delay));
+
+  const label = document.createElement("span");
+  label.className = "bangarang-delay-label";
+  label.textContent = `${slider.value}ms`;
+
+  slider.addEventListener("pointerdown", (e) => e.stopPropagation());
+  slider.addEventListener("input", (e) => {
+    item.delay = clampBangarangDelay(e.target.value);
+    label.textContent = `${item.delay}ms`;
+    const frame = resizableElRefs.get(item.id);
+    const img1 = frame && frame.querySelector(".bangarang-img-front");
+    const img2 = frame && frame.querySelector(".bangarang-img-back");
+    if (img1 && img2) startBangarangTimer(item, img1, img2); // restart at the new speed
+    scheduleSaveEntry();
+  });
+
+  bar.append(icon, slider, label);
+  return bar;
+}
+
+/**
  * Build the frame-style toolbar shown when a photo is selected: a single
  * toggle button that switches between the default polaroid frame (with
  * caption) and a bare, frameless image. Flip/tape/shadow live in the
@@ -2358,6 +3176,8 @@ function createItemWrap(item) {
       ? createYoutubeCard(item)
       : item.type === "text"
       ? createTextBoxCard(item)
+      : item.type === "bangarang"
+      ? createBangarangCard(item)
       : createNoteCard(item);
   wrap.appendChild(card);
 
@@ -2381,7 +3201,7 @@ function createItemWrap(item) {
 // Item types that support the resize (stretch) handle \u2014 a deliberately
 // narrower set than every item type, since "note"/"youtube" cards have
 // fixed-proportion internal layouts that a free-form stretch would break.
-const RESIZABLE_TYPES = new Set(["photo", "text"]);
+const RESIZABLE_TYPES = new Set(["photo", "text", "bangarang"]);
 
 function updateItemWrap(item, wrap) {
   wrap.style.left = `${item.x}%`;
@@ -2419,13 +3239,15 @@ function updateItemWrap(item, wrap) {
     }
     // Frameless items (text boxes, "none"-frame photos) have no card
     // background of their own, so show a dashed outline while selected —
-    // otherwise their bounds would be invisible.
-    if (item.type === "text" || item.frame === "none") {
+    // otherwise their bounds would be invisible. A bangarang's frame always
+    // has a visible background/shadow of its own (see .bangarang-frame), but
+    // gets the same outline anyway as plain selection feedback.
+    if (item.type === "text" || item.frame === "none" || item.type === "bangarang") {
       resizeTarget.classList.toggle("selected-outline", isSoleSelection);
     }
   }
 
-  wrap.querySelectorAll(".item-btn, .item-style-bar, .item-note-bg-bar, .item-photo-frame-bar").forEach((n) => n.remove());
+  wrap.querySelectorAll(".item-btn, .item-style-bar, .item-note-bg-bar, .item-photo-frame-bar, .item-bangarang-bar").forEach((n) => n.remove());
   if (isSoleSelection) {
     const delBtn = document.createElement("button");
     delBtn.className = "item-btn delete";
@@ -2461,6 +3283,8 @@ function updateItemWrap(item, wrap) {
     } else if (item.type === "photo") {
       if (item.frame !== "none") wrap.appendChild(createStyleBar(item, "#4a3826"));
       wrap.appendChild(createPhotoFrameBar(item));
+    } else if (item.type === "bangarang") {
+      wrap.appendChild(createBangarangBar(item));
     }
   }
 }
@@ -2484,6 +3308,7 @@ function forceRebuildItem(id) {
   noteCardRefs.delete(id);
   resizableElRefs.delete(id);
   destroyYoutubePlayer(id);
+  stopBangarangTimer(id);
 }
 
 /**
@@ -2510,6 +3335,7 @@ function renderCanvas() {
       noteCardRefs.delete(id);
       resizableElRefs.delete(id);
       destroyYoutubePlayer(id);
+      stopBangarangTimer(id);
     }
   }
 
@@ -2889,7 +3715,9 @@ function renderHooks() {
 /**
  * Load and render the published read-only view for one entry into
  * #view-readonly. Shows a "not found" message instead if the entry doesn't
- * exist (e.g. a stale or mistyped link).
+ * exist (e.g. a stale or mistyped link). A protected entry shows a password
+ * gate in place of the canvas instead — decrypted fully client-side, same as
+ * the static export, so the server here never sees the password either.
  * @param {string} id - Entry id from the /view/<id> URL.
  * @returns {Promise<void>}
  */
@@ -2904,7 +3732,19 @@ async function initReadOnlyView(id) {
   const entry = await res.json();
   el("readonly-title").textContent = entry.title || "Untitled";
   el("readonly-date").textContent = formatDate(entry.date);
-  renderReadOnlyCanvas(entry);
+  if (entry.locked) {
+    renderPasswordGate(el("readonly-canvas"), async (password) => {
+      const decrypted = await decryptEntryPayload(password, entry.enc);
+      if (!decrypted) return false;
+      entry.items = (decrypted.items || []).map((it) => itemImagesToAbsolute(id, it));
+      entry.canvasBg = decrypted.canvasBg;
+      entry.canvasBgImage = decrypted.canvasBgImage ? portableImgToAbsolute(id, decrypted.canvasBgImage) : undefined;
+      renderReadOnlyCanvas(entry);
+      return true;
+    });
+  } else {
+    renderReadOnlyCanvas(entry);
+  }
 }
 
 /**
@@ -2913,11 +3753,13 @@ async function initReadOnlyView(id) {
  * exactly as far down as the content goes. Unlike the editor's
  * growCanvasToFitContent, there's no endless-scroll buffer added here —
  * the published page's scroll distance is capped to its actual content.
- * @param {object} entry - Full entry record (title, date, items, canvasBg).
+ * @param {object} entry - Full entry record (title, date, items, canvasBg) —
+ *   already decrypted if it was protected (see initReadOnlyView).
  */
 function renderReadOnlyCanvas(entry) {
   const canvas = el("readonly-canvas");
   canvas.innerHTML = "";
+  canvas.classList.remove("password-gate"); // in case this is replacing the gate
   canvas.style.backgroundColor = entry.canvasBg || "";
   if (entry.canvasBgImage) {
     canvas.style.backgroundImage = `url("${entry.canvasBgImage}")`;
@@ -2970,7 +3812,50 @@ function createReadOnlyCard(item) {
   if (item.type === "photo") return createReadOnlyPhotoCard(item);
   if (item.type === "youtube") return createReadOnlyYoutubeCard(item);
   if (item.type === "text") return createReadOnlyTextCard(item);
+  if (item.type === "bangarang") return createReadOnlyBangarangCard(item);
   return createReadOnlyNoteCard(item);
+}
+
+/**
+ * @param {object} item - The bangarang-type item.
+ * @returns {HTMLElement} A `.bangarang-frame` holding both images stacked
+ *   (each `object-fit: cover`), toggling which is visible forever — same
+ *   pre-load-then-flip design as the editor's createBangarangCard, and for
+ *   the same reason: swapping one `<img>`'s src every tick can't keep up
+ *   with a real full-size photo at a fast delay. This page never gets torn
+ *   down/rebuilt the way the editor's canvas does, so unlike
+ *   startBangarangTimer there, this interval is just started once (as soon
+ *   as both images are loaded) and left running for the page's lifetime.
+ */
+function createReadOnlyBangarangCard(item) {
+  const frame = document.createElement("div");
+  frame.className = "bangarang-frame";
+  if (item.h) frame.style.height = `${item.h}px`;
+
+  const img1 = document.createElement("img");
+  img1.className = "bangarang-img bangarang-img-front";
+  img1.src = item.img1;
+  img1.draggable = false;
+
+  const img2 = document.createElement("img");
+  img2.className = "bangarang-img bangarang-img-back";
+  img2.src = item.img2;
+  img2.draggable = false;
+
+  frame.append(img1, img2);
+
+  const start = () => {
+    let showingFirst = true;
+    setInterval(() => {
+      showingFirst = !showingFirst;
+      img1.style.opacity = showingFirst ? "1" : "0";
+      img2.style.opacity = showingFirst ? "0" : "1";
+    }, clampBangarangDelay(item.delay));
+  };
+  if (img2.complete) start();
+  else img2.addEventListener("load", start, { once: true });
+
+  return frame;
 }
 
 /** @param {object} item - The photo-type item. @returns {HTMLElement} */

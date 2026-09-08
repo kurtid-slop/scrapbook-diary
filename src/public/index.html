@@ -33,11 +33,16 @@
       <button id="add-photo-btn" class="btn btn-orange">+ Photo</button>
       <button id="add-text-btn" class="btn btn-gold">+ Text</button>
       <button id="add-music-btn" class="btn btn-purple">+ Music</button>
+      <button id="add-bangarang-btn" class="btn btn-teal" title="Loop two images, flickering between them">⚡ Bangarang</button>
+      <button id="lock-btn" class="btn">🔓 Protect</button>
       <button id="publish-btn" class="btn">Publish</button>
       <input id="photo-file-input" type="file" accept="image/*" hidden />
       <input id="canvas-bg-file-input" type="file" accept="image/*" hidden />
     </div>
     <div id="canvas-empty" class="canvas-empty" hidden>This page is blank — add a photo or a note to start scrapbooking.</div>
+    <!-- Shown instead of the canvas while a password-protected entry hasn't
+         been unlocked yet this session — see showEntryLockGate in app.js. -->
+    <div id="entry-lock-gate" class="password-gate" hidden></div>
     <div id="canvas" class="scrapbook-canvas"></div>
   </section>
 

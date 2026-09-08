@@ -58,8 +58,17 @@ function mimeTypeFor(filePath) {
  * it has a photo) that photo set as both the tab favicon and the page's
  * Open Graph/Twitter Card image, so a shared link's preview and the browser
  * tab both show the same "cover photo" the entries list already does.
+ * A password-protected entry (entry.locked) has no plaintext `items` to read
+ * a preview photo or rewrite upload URLs from — its real content lives only
+ * as ciphertext in entry.enc, decryptable in-browser (no server involved,
+ * which matters here since this export has none) once the viewer enters the
+ * right password. This function doesn't need to treat that case specially:
+ * `entry.items || []` is just empty, so the loop below is a no-op and
+ * previewUrl stays null, same as any other entry with no photos. Its
+ * uploads/ folder is still copied verbatim so those photos exist on disk for
+ * the page to show once unlocked.
  * @param {string} id
- * @returns {{id: string, title: string, date: number, itemCount: number, previewUrl: string|null}}
+ * @returns {{id: string, title: string, date: number, itemCount: number, previewUrl: string|null, locked: boolean}}
  */
 function exportEntry(id) {
   const srcDir = path.join(ENTRIES_DIR, id);
@@ -84,6 +93,13 @@ function exportEntry(id) {
       if (!previewUrl) {
         previewUrl = `entries/${id}/${item.img.slice(2)}`;
         pagePreviewImg = item.img;
+      }
+    } else if (item.type === "bangarang") {
+      if (item.img1) item.img1 = toRelativeUploadPath(item.img1);
+      if (item.img2) item.img2 = toRelativeUploadPath(item.img2);
+      if (!previewUrl && item.img1) {
+        previewUrl = `entries/${id}/${item.img1.slice(2)}`;
+        pagePreviewImg = item.img1;
       }
     }
   }
@@ -115,6 +131,7 @@ function exportEntry(id) {
     date: entry.date,
     itemCount: (entry.items || []).length,
     previewUrl,
+    locked: !!entry.locked,
   };
 }
 

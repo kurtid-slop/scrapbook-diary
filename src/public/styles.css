@@ -64,11 +64,18 @@ body {
   font-size: 14px;
 }
 
+.btn:disabled,
+.entry-title-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .btn-accent { background: #c98a6b; color: #fff; border: none; }
 .btn-orange { background: #c98a6b; color: #fff; border: none; }
 .btn-green { background: #8c9b74; color: #fff; border: none; }
 .btn-purple { background: #9b7fa6; color: #fff; border: none; }
 .btn-gold { background: #c9a15a; color: #fff; border: none; }
+.btn-teal { background: #4f8a8a; color: #fff; border: none; }
 
 .list-header {
   display: flex;
@@ -141,6 +148,7 @@ body {
 }
 
 .entry-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.entry-thumb.locked { font-size: 34px; }
 
 .entry-card .entry-card-title {
   font-size: 22px;
@@ -290,6 +298,34 @@ body {
 .plain-photo-img.no-shadow {
   box-shadow: none;
 }
+
+/* A bangarang's two images stack directly on top of each other inside a
+   fixed-size frame (default aspect-ratio until resized — see
+   updateItemWrap's item.h handling) and are both always `object-fit:
+   cover`, so a mismatched pair doesn't make the box jump size on every
+   flip. Only one is ever visible at a time (see startBangarangTimer). */
+.bangarang-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 2px;
+  overflow: hidden;
+  background: #12161b;
+  box-shadow: 0 6px 14px rgba(60, 45, 20, 0.25);
+}
+
+.bangarang-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+
+.bangarang-img-back { opacity: 0; }
 
 /* Frameless items (a "none"-frame photo, or any text box) have no card
    background of their own to show their bounds, so give them a light
@@ -607,7 +643,8 @@ body {
 
 .item-style-bar,
 .item-note-bg-bar,
-.item-photo-frame-bar {
+.item-photo-frame-bar,
+.item-bangarang-bar {
   position: absolute;
   display: flex;
   align-items: center;
@@ -623,6 +660,23 @@ body {
 .item-style-bar { top: -14px; left: -14px; }
 .item-note-bg-bar { bottom: -14px; left: -14px; }
 .item-photo-frame-bar { bottom: -14px; left: -14px; }
+.item-bangarang-bar { bottom: -14px; left: -14px; }
+
+.bangarang-bar-icon { font-size: 12px; padding: 0 2px; }
+
+.bangarang-delay-slider {
+  width: 70px;
+  accent-color: #4f8a8a;
+  cursor: pointer;
+}
+
+.bangarang-delay-label {
+  color: #fff;
+  font-size: 10px;
+  font-family: "Space Mono", monospace;
+  min-width: 34px;
+  text-align: right;
+}
 
 .style-font-btn {
   width: 20px;
@@ -933,6 +987,118 @@ body {
   display: flex;
   gap: 10px;
   margin-top: 4px;
+}
+
+/* Bangarang's "pick two images" modal, opened from the entry toolbar's
+   ⚡ Bangarang button — same overlay/card look as .crop-overlay/.crop-modal,
+   stretched full-width for its two side-by-side slots. */
+.bangarang-modal {
+  align-items: stretch;
+  width: 340px;
+}
+
+.bangarang-modal-sub {
+  color: #8a7a5c;
+  font-size: 13px;
+  text-align: center;
+  margin-top: -8px;
+}
+
+.bangarang-slots-row {
+  display: flex;
+  gap: 14px;
+}
+
+.bangarang-slot {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.bangarang-slot-preview {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  background-color: #eee0c4;
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #c9a15a;
+  font-size: 28px;
+  border: 1px dashed #d9c7a3;
+}
+
+/* Password set/change/remove modal, opened from the entry toolbar's lock
+   button — same overlay/card look as .crop-overlay/.crop-modal, just
+   stretched full-width for its stacked password inputs instead of centered
+   around a fixed-size crop viewport. */
+.password-modal {
+  align-items: stretch;
+  width: 300px;
+}
+
+.password-modal input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d9c7a3;
+  border-radius: 8px;
+  font-family: "Lora", serif;
+  font-size: 15px;
+}
+
+.password-error {
+  color: #b23b3b;
+  font-size: 13px;
+  min-height: 16px;
+}
+
+.password-remove-btn {
+  color: #b23b3b;
+  border-color: #e0b3b3;
+  justify-content: center;
+}
+
+/* Inline gate shown in place of an entry's content — on the editor's canvas
+   (entry-lock-gate) and on the published read-only/static views
+   (readonly-canvas/#readonly-canvas) — until the right password is entered.
+   See renderPasswordGate in app.js/static.js. */
+.password-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 90px 20px;
+  text-align: center;
+}
+
+/* Without this, toggling entry-lock-gate's `hidden` attribute after a
+   correct password (see showEntryLockGate in app.js) does nothing: an
+   author class rule and the browser's UA `[hidden] { display: none }` rule
+   have equal specificity, and the author rule wins the tie — same pitfall
+   already worked around for .tabs/.view above. */
+.password-gate[hidden] {
+  display: none;
+}
+
+.password-gate .lock-icon { font-size: 42px; }
+
+.password-gate form {
+  display: flex;
+  gap: 10px;
+}
+
+.password-gate input[type="password"] {
+  padding: 10px 14px;
+  border: 1px solid #d9c7a3;
+  border-radius: 8px;
+  font-family: "Lora", serif;
+  font-size: 15px;
+  min-width: 220px;
 }
 
 .context-menu {

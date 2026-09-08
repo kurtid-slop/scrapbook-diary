@@ -165,13 +165,14 @@ app.get("/api/entries", async (req, res) => {
     const entries = await Promise.all(
       ids.map(async (id) => {
         const entry = await readEntry(id);
-        const preview = (entry.items || []).find((it) => it.type === "photo");
+        const preview = (entry.items || []).find((it) => it.type === "photo" || (it.type === "bangarang" && it.img1));
         return {
           id: entry.id,
           title: entry.title,
           date: entry.date,
           itemCount: (entry.items || []).length,
-          previewUrl: preview ? preview.img : null,
+          previewUrl: preview ? (preview.type === "photo" ? preview.img : preview.img1) : null,
+          locked: !!entry.locked,
         };
       })
     );
@@ -213,6 +214,12 @@ app.post("/api/entries", async (req, res) => {
  * Overwrite an entry's editable fields (title, date, items, canvasBg, ...)
  * with whatever the client sends, shallow-merged onto the existing record.
  * The id itself is never changed, even if the body includes one.
+ *
+ * A password-protected entry (entry.locked) is encrypted client-side before
+ * it ever reaches this route: its `items`/`canvasBg`/`canvasBgImage` arrive
+ * as empty/null and the real content lives, ciphertext-only, in `enc` (see
+ * encryptEntryPayload in app.js) — this route has no idea an entry is
+ * protected and just stores whatever fields it's given, same as always.
  */
 app.put("/api/entries/:id", async (req, res) => {
   try {

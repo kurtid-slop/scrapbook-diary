@@ -15,6 +15,8 @@ src/data/
 
 Open any entry's JSON file directly to see its shape — title, date, and a list of items (photos and notes) with position, rotation, and size.
 
+A photo picked as HEIC/HEIF (the default format for an iPhone's Camera Roll) is converted to JPEG right in the browser before it's ever uploaded — every browser except Safari just renders a HEIC `<img>` as a broken image, so uploading it as-is would silently produce a photo, bangarang, or crop preview that never shows.
+
 ## Running it
 
 ```bash
@@ -36,6 +38,33 @@ Then open http://localhost:3000.
 | POST   | `/api/uploads`         | Upload a photo (multipart `photo` field), returns its URL |
 | GET    | `/api/style`           | Read the current custom CSS |
 | PUT    | `/api/style`           | Save custom CSS |
+
+## Password-protecting an entry
+
+Click **🔓 Protect** in an entry's toolbar to set a password on it. From
+then on, opening that entry — for editing, on the live app's `/view/<id>`
+preview, or on the static GitHub Pages export — asks for the password
+first.
+
+This isn't just a UI gate: the entry's `items`/`canvasBg`/`canvasBgImage`
+are AES-GCM encrypted (key derived from the password via PBKDF2) before
+they're ever written to `entry.json`, so the file on disk (and the one
+GitHub Pages serves) never holds a protected entry's content in plaintext —
+only its title and date stay visible, so you can still find it in the list.
+Decryption happens entirely in the browser via the Web Crypto API; there's
+no password stored anywhere, live server included, so losing the password
+means losing that entry's content.
+
+Change or remove a password from the same **🔒 Protected** button once
+you've unlocked the entry.
+
+## Bangarang
+
+Click **⚡ Bangarang**, choose two images (one button per image, so there's
+no need to know about multi-selecting files), and Add — it becomes an item
+that flickers between them forever. Select it to get a delay slider on its
+bar, from 30ms up to 1 second, live-updating the speed as you drag. Works
+the same in the editor, the live preview, and the static export.
 
 ## Extending it
 
