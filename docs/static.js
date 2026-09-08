@@ -9,6 +9,18 @@
 const CANVAS_UNIT_HEIGHT = 560;
 const CANVAS_CONTENT_PADDING = 150;
 const STICKY_COLORS = ["#fff59d", "#ffcc80", "#ff8a80", "#a5d6a7", "#90caf9", "#ce93d8"];
+
+// Mirrors app.js's bangarang constants — see there for the rationale.
+const BANGARANG_MIN_DELAY = 30;
+const BANGARANG_MAX_DELAY = 1000;
+const BANGARANG_DEFAULT_DELAY = 150;
+
+/** @param {number} ms @returns {number} `ms` clamped to the bangarang delay range. */
+function clampBangarangDelay(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return BANGARANG_DEFAULT_DELAY;
+  return Math.min(BANGARANG_MAX_DELAY, Math.max(BANGARANG_MIN_DELAY, n));
+}
 const FONT_OPTIONS = [
   { key: "handwritten", family: '"Caveat", cursive' },
   { key: "serif", family: '"Lora", serif' },
@@ -16,6 +28,136 @@ const FONT_OPTIONS = [
 ];
 
 const el = (id) => document.getElementById(id);
+
+// ---------- password protection: crypto ----------
+// Mirrors the encrypt/decrypt half of src/public/app.js's crypto section
+// (this file only ever decrypts — a static export can't be edited, so
+// there's no lock/protect UI here). See that file for the full rationale:
+// AES-GCM with a PBKDF2-derived key, entirely native SubtleCrypto so this
+// works with zero server and zero dependencies, and a wrong password is
+// just decrypt() throwing rather than a separate check.
+const PBKDF2_ITERATIONS = 200000;
+
+/** @param {string} str - base64 @returns {Uint8Array} */
+function base64ToBytes(str) {
+  const binary = atob(str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * @param {string} password
+ * @param {Uint8Array} salt
+ * @returns {Promise<CryptoKey>}
+ */
+async function deriveEntryKey(password, salt) {
+  const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+/**
+ * Try to decrypt entry.enc with a candidate password.
+ * @param {string} password
+ * @param {{salt: string, iv: string, data: string}} enc
+ * @returns {Promise<object|null>} The decrypted `{items, canvasBg,
+ *   canvasBgImage}` payload, or null if the password was wrong.
+ */
+async function decryptEntryPayload(password, enc) {
+  try {
+    const key = await deriveEntryKey(password, base64ToBytes(enc.salt));
+    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(enc.iv) }, key, base64ToBytes(enc.data));
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    return null; // wrong password (or corrupt data) — the AES-GCM auth tag failed
+  }
+}
+
+/**
+ * An encrypted payload stores a photo's URL as just its entry-relative
+ * `uploads/<file>` tail (see absoluteImgToPortable in app.js) rather than
+ * whatever host/path it was encrypted from — this page's own uploads/
+ * folder (copied next to it by build-static.js) sits one level up from it.
+ * @param {string} portable
+ * @returns {string}
+ */
+function portableImgToRelative(portable) {
+  return `./${portable}`;
+}
+
+/**
+ * The reverse of app.js's itemImagesToPortable, run on a just-decrypted
+ * payload here — applies portableImgToRelative to whichever image URL
+ * field(s) an item actually has (a photo's `img`, or a bangarang's
+ * `img1`/`img2`).
+ * @param {object} item
+ * @returns {object}
+ */
+function itemImagesToRelative(item) {
+  if (item.type === "photo" && item.img) return { ...item, img: portableImgToRelative(item.img) };
+  if (item.type === "bangarang") return { ...item, img1: portableImgToRelative(item.img1), img2: portableImgToRelative(item.img2) };
+  return item;
+}
+
+/**
+ * Render an inline "enter password to continue" gate into `container`,
+ * replacing whatever it currently shows — see the matching function in
+ * app.js for the full rationale (shared verbatim, minus the editor-only
+ * callers that file also has).
+ * @param {HTMLElement} container
+ * @param {(password: string) => Promise<boolean>} onSubmit
+ */
+function renderPasswordGate(container, onSubmit) {
+  container.innerHTML = "";
+  container.classList.add("password-gate");
+
+  const icon = document.createElement("div");
+  icon.className = "lock-icon";
+  icon.textContent = "🔒";
+
+  const label = document.createElement("div");
+  label.className = "diary-date";
+  label.textContent = "This entry is password protected.";
+
+  const form = document.createElement("form");
+  const input = document.createElement("input");
+  input.type = "password";
+  input.placeholder = "Password";
+  input.autocomplete = "current-password";
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "submit";
+  submitBtn.className = "btn btn-accent";
+  submitBtn.textContent = "Unlock";
+  form.append(input, submitBtn);
+
+  const error = document.createElement("div");
+  error.className = "password-error";
+
+  container.append(icon, label, form, error);
+  input.focus();
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!input.value) return;
+    input.disabled = true;
+    submitBtn.disabled = true;
+    error.textContent = "";
+    const ok = await onSubmit(input.value);
+    if (!ok) {
+      error.textContent = "Incorrect password.";
+      input.disabled = false;
+      submitBtn.disabled = false;
+      input.value = "";
+      input.focus();
+    }
+  });
+}
 
 /**
  * @param {number} ts - Unix ms timestamp.
@@ -460,7 +602,48 @@ function createReadOnlyCard(item) {
   if (item.type === "photo") return createReadOnlyPhotoCard(item);
   if (item.type === "youtube") return createReadOnlyYoutubeCard(item);
   if (item.type === "text") return createReadOnlyTextCard(item);
+  if (item.type === "bangarang") return createReadOnlyBangarangCard(item);
   return createReadOnlyNoteCard(item);
+}
+
+/**
+ * @param {object} item - The bangarang-type item.
+ * @returns {HTMLElement} A `.bangarang-frame` holding both images stacked
+ *   (each `object-fit: cover`), toggling which is visible forever — see the
+ *   matching function in app.js for the full rationale (shared verbatim):
+ *   swapping one `<img>`'s src every tick can't keep up with a real
+ *   full-size photo at a fast delay, so both are pre-loaded up front and
+ *   only their visibility toggles.
+ */
+function createReadOnlyBangarangCard(item) {
+  const frame = document.createElement("div");
+  frame.className = "bangarang-frame";
+  if (item.h) frame.style.height = `${item.h}px`;
+
+  const img1 = document.createElement("img");
+  img1.className = "bangarang-img bangarang-img-front";
+  img1.src = item.img1;
+  img1.draggable = false;
+
+  const img2 = document.createElement("img");
+  img2.className = "bangarang-img bangarang-img-back";
+  img2.src = item.img2;
+  img2.draggable = false;
+
+  frame.append(img1, img2);
+
+  const start = () => {
+    let showingFirst = true;
+    setInterval(() => {
+      showingFirst = !showingFirst;
+      img1.style.opacity = showingFirst ? "1" : "0";
+      img2.style.opacity = showingFirst ? "0" : "1";
+    }, clampBangarangDelay(item.delay));
+  };
+  if (img2.complete) start();
+  else img2.addEventListener("load", start, { once: true });
+
+  return frame;
 }
 
 /**
@@ -473,6 +656,7 @@ function createReadOnlyCard(item) {
 function renderReadOnlyCanvas(entry) {
   const canvas = el("readonly-canvas");
   canvas.innerHTML = "";
+  canvas.classList.remove("password-gate"); // in case this is replacing the gate
   canvas.style.backgroundColor = entry.canvasBg || "";
   if (entry.canvasBgImage) {
     canvas.style.backgroundImage = `url("${entry.canvasBgImage}")`;
@@ -515,7 +699,9 @@ function renderReadOnlyCanvas(entry) {
 
 /**
  * Boot for one entry's static page (docs/entries/<id>/index.html): fetch the
- * entry.json sitting next to this page and render it.
+ * entry.json sitting next to this page and render it. A protected entry
+ * shows a password gate in place of the canvas instead — this page has no
+ * server at all, so decryption happens entirely in the visitor's browser.
  * @returns {Promise<void>}
  */
 async function initStaticEntryPage() {
@@ -528,7 +714,19 @@ async function initStaticEntryPage() {
   const entry = await res.json();
   el("readonly-title").textContent = entry.title || "Untitled";
   el("readonly-date").textContent = formatDate(entry.date);
-  renderReadOnlyCanvas(entry);
+  if (entry.locked) {
+    renderPasswordGate(el("readonly-canvas"), async (password) => {
+      const decrypted = await decryptEntryPayload(password, entry.enc);
+      if (!decrypted) return false;
+      entry.items = (decrypted.items || []).map(itemImagesToRelative);
+      entry.canvasBg = decrypted.canvasBg;
+      entry.canvasBgImage = decrypted.canvasBgImage ? portableImgToRelative(decrypted.canvasBgImage) : undefined;
+      renderReadOnlyCanvas(entry);
+      return true;
+    });
+  } else {
+    renderReadOnlyCanvas(entry);
+  }
 }
 
 /**
@@ -554,12 +752,19 @@ async function initStaticListPage() {
     card.style.color = "inherit";
 
     const thumb = document.createElement("div");
-    thumb.className = "entry-thumb";
-    if (en.previewUrl) {
+    // A locked entry's content (including any photo) was never exported as
+    // plaintext, so there's no previewUrl to show — a badge instead, same
+    // as the "no photo" placeholder.
+    if (en.locked) {
+      thumb.className = "entry-thumb locked";
+      thumb.textContent = "🔒";
+    } else if (en.previewUrl) {
+      thumb.className = "entry-thumb";
       const img = document.createElement("img");
       img.src = en.previewUrl;
       thumb.appendChild(img);
     } else {
+      thumb.className = "entry-thumb";
       thumb.textContent = "no photo";
     }
 
@@ -569,7 +774,9 @@ async function initStaticListPage() {
 
     const meta = document.createElement("div");
     meta.className = "entry-card-meta diary-date";
-    meta.textContent = `${formatDate(en.date)} · ${en.itemCount} item${en.itemCount === 1 ? "" : "s"}`;
+    meta.textContent = en.locked
+      ? `${formatDate(en.date)} · protected`
+      : `${formatDate(en.date)} · ${en.itemCount} item${en.itemCount === 1 ? "" : "s"}`;
 
     card.append(thumb, title, meta);
     grid.appendChild(card);
