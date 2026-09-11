@@ -230,6 +230,20 @@ body {
   box-shadow: none;
 }
 
+/* A "phone"-layout entry (chosen at creation — see openNewEntryLayoutModal)
+   keeps the exact same endless-vertical-scroll canvas, just narrowed and
+   centered to read like a phone screen instead of a wide desktop page. Item
+   x/y are already percentages of the canvas's own width/a fixed reference
+   height, so narrowing it needs no data-model change — everything (drag
+   bounds, new-item placement) already measures the canvas's actual current
+   width at the time. Its password gate (shown in place of either canvas
+   until unlocked) gets the same width, just for visual consistency. */
+.scrapbook-canvas.layout-phone,
+.password-gate.layout-phone {
+  max-width: 430px;
+  margin: 0 auto;
+}
+
 .canvas-empty {
   position: absolute;
   z-index: 1;
@@ -1031,6 +1045,43 @@ body {
   font-size: 28px;
   border: 1px dashed #d9c7a3;
 }
+
+/* New-entry layout picker (laptop vs. phone), opened by the "+ New entry"
+   button before the entry is even created — see openNewEntryLayoutModal. */
+.layout-modal {
+  align-items: stretch;
+  width: 380px;
+}
+
+.layout-options-row {
+  display: flex;
+  gap: 14px;
+}
+
+.layout-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 12px;
+  background: #fffdf6;
+  border: 1px solid #d9c7a3;
+  border-radius: 10px;
+  cursor: pointer;
+  font-family: "Lora", serif;
+  color: #4a3826;
+  text-align: center;
+}
+
+.layout-option:hover {
+  border-color: #c98a6b;
+  background: #fff6ec;
+}
+
+.layout-option-icon { font-size: 30px; }
+.layout-option-label { font-size: 16px; font-weight: bold; }
+.layout-option-desc { font-size: 12px; color: #8a7a5c; }
 
 /* Password set/change/remove modal, opened from the entry toolbar's lock
    button — same overlay/card look as .crop-overlay/.crop-modal, just
