@@ -302,6 +302,7 @@ el("tab-diary").addEventListener("click", () => {
 });
 el("tab-lab").addEventListener("click", () => showView("lab"));
 el("back-btn").addEventListener("click", async () => {
+  await flushPendingSaveEntry();
   resetCanvasState();
   state.activeEntry = null;
   // Re-fetch the list so a renamed title, new photo, or item-count change
@@ -373,20 +374,110 @@ function renderEntriesGrid() {
 
     const meta = document.createElement("div");
     meta.className = "entry-card-meta diary-date";
-    meta.textContent = en.locked
+    const metaBase = en.locked
       ? `${formatDate(en.date)} \u00b7 protected`
       : `${formatDate(en.date)} \u00b7 ${en.itemCount} item${en.itemCount === 1 ? "" : "s"}`;
+    // Laptop is the common case and needs no callout \u2014 only flag the
+    // narrower phone layout, same as locked only getting a badge when true.
+    meta.textContent = en.layout === "phone" ? `${metaBase} \u00b7 \ud83d\udcf1` : metaBase;
 
     card.append(del, thumb, title, meta);
     grid.appendChild(card);
   }
 }
 
+/**
+ * Ask which layout a brand-new entry's canvas should use, before it's even
+ * created — "laptop" (the original wide, freely-placed canvas) or "phone"
+ * (the same endless-vertical-scroll canvas, just narrowed and centered to
+ * read like a phone screen — see .scrapbook-canvas.layout-phone). The
+ * choice is baked into the entry at creation (entry.layout) rather than
+ * offered as a later toggle.
+ * @returns {Promise<"laptop"|"phone"|null>} null if the user backed out
+ *   (Escape, or clicking outside the modal) without choosing either.
+ */
+function openNewEntryLayoutModal() {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "crop-overlay";
+    const modal = document.createElement("div");
+    modal.className = "crop-modal layout-modal";
+
+    const heading = document.createElement("div");
+    heading.className = "crop-heading";
+    heading.textContent = "New entry";
+
+    const sub = document.createElement("div");
+    sub.className = "bangarang-modal-sub";
+    sub.textContent = "What kind of page is this?";
+
+    const optionsRow = document.createElement("div");
+    optionsRow.className = "layout-options-row";
+
+    /**
+     * @param {"laptop"|"phone"} layout
+     * @param {string} icon
+     * @param {string} label
+     * @param {string} desc
+     * @returns {HTMLElement}
+     */
+    function createOption(layout, icon, label, desc) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "layout-option";
+      const iconEl = document.createElement("div");
+      iconEl.className = "layout-option-icon";
+      iconEl.textContent = icon;
+      const labelEl = document.createElement("div");
+      labelEl.className = "layout-option-label";
+      labelEl.textContent = label;
+      const descEl = document.createElement("div");
+      descEl.className = "layout-option-desc";
+      descEl.textContent = desc;
+      btn.append(iconEl, labelEl, descEl);
+      btn.addEventListener("click", () => {
+        cleanup();
+        resolve(layout);
+      });
+      return btn;
+    }
+
+    optionsRow.append(
+      createOption("laptop", "💻", "Laptop", "Wide canvas — place things freely anywhere on the page."),
+      createOption("phone", "📱", "Smartphone", "Narrow page, endless vertical scroll.")
+    );
+
+    modal.append(heading, sub, optionsRow);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    function cleanup() {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+    }
+    function onKeydown(e) {
+      if (e.key === "Escape") {
+        cleanup();
+        resolve(null);
+      }
+    }
+    document.addEventListener("keydown", onKeydown);
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) {
+        cleanup();
+        resolve(null);
+      }
+    });
+  });
+}
+
 el("new-entry-btn").addEventListener("click", async () => {
+  const layout = await openNewEntryLayoutModal();
+  if (!layout) return; // backed out of the modal — no entry created
   const res = await fetch("/api/entries", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: "New entry" }),
+    body: JSON.stringify({ title: "New entry", layout }),
   });
   const entry = await res.json();
   await loadEntries();
@@ -411,6 +502,9 @@ async function openEntry(id) {
   state.selectedItemIds.clear();
   el("entry-title-input").value = state.activeEntry.title;
   el("entry-date").textContent = formatDate(state.activeEntry.date);
+  // Plaintext even on a locked entry (only its content is encrypted), so
+  // this can apply immediately rather than waiting on showEntryLockGate.
+  el("canvas").classList.toggle("layout-phone", state.activeEntry.layout === "phone");
   showView("entry");
   if (state.activeEntry.locked) {
     showEntryLockGate();
@@ -453,21 +547,44 @@ function buildProtectedPayload(entry) {
  * so an in-progress edit never touches disk unencrypted, and a stale
  * plaintext copy from before it was locked can't linger either.
  */
+/**
+ * The actual PUT behind scheduleSaveEntry's debounce, factored out so
+ * flushPendingSaveEntry can also call it directly (immediately, no debounce)
+ * when navigating away from an entry.
+ * @param {object} entry - state.activeEntry at the time this was scheduled.
+ * @returns {Promise<void>}
+ */
+async function performSaveEntry(entry) {
+  const { id, title, date, locked } = entry;
+  const body = locked
+    ? { title, date, locked: true, enc: (entry.enc = await encryptEntryPayload(activeEntryPassword, buildProtectedPayload(entry))), items: [], canvasBg: null, canvasBgImage: null }
+    : { title, date, locked: false, enc: null, items: entry.items, canvasBg: entry.canvasBg, canvasBgImage: entry.canvasBgImage };
+  await fetch(`/api/entries/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  setSaveIndicator("saved");
+}
+
 function scheduleSaveEntry() {
   setSaveIndicator("saving\u2026");
   clearTimeout(saveEntryTimer);
-  saveEntryTimer = setTimeout(async () => {
-    const { id, title, date, locked } = state.activeEntry;
-    const body = locked
-      ? { title, date, locked: true, enc: (state.activeEntry.enc = await encryptEntryPayload(activeEntryPassword, buildProtectedPayload(state.activeEntry))), items: [], canvasBg: null, canvasBgImage: null }
-      : { title, date, locked: false, enc: null, items: state.activeEntry.items, canvasBg: state.activeEntry.canvasBg, canvasBgImage: state.activeEntry.canvasBgImage };
-    await fetch(`/api/entries/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    setSaveIndicator("saved");
-  }, 500);
+  const entry = state.activeEntry;
+  saveEntryTimer = setTimeout(() => performSaveEntry(entry), 500);
+}
+
+/**
+ * Immediately run (and cancel the debounce for) any pending autosave \u2014 call
+ * before navigating away from the open entry, so an edit made just before
+ * leaving is neither lost nor left to fire later against a now-null
+ * state.activeEntry (see back-btn's click handler).
+ * @returns {Promise<void>}
+ */
+async function flushPendingSaveEntry() {
+  if (!state.activeEntry) return;
+  clearTimeout(saveEntryTimer);
+  await performSaveEntry(state.activeEntry);
 }
 
 el("entry-title-input").addEventListener("input", (e) => {
@@ -576,6 +693,7 @@ function showEntryLockGate() {
   el("canvas-empty").hidden = true;
   el("canvas").hidden = true;
   el("entry-lock-gate").hidden = false;
+  el("entry-lock-gate").classList.toggle("layout-phone", state.activeEntry.layout === "phone");
   renderPasswordGate(el("entry-lock-gate"), async (password) => {
     const decrypted = await decryptEntryPayload(password, state.activeEntry.enc);
     if (!decrypted) return false;
@@ -3733,6 +3851,7 @@ async function initReadOnlyView(id) {
   el("readonly-title").textContent = entry.title || "Untitled";
   el("readonly-date").textContent = formatDate(entry.date);
   if (entry.locked) {
+    el("readonly-canvas").classList.toggle("layout-phone", entry.layout === "phone");
     renderPasswordGate(el("readonly-canvas"), async (password) => {
       const decrypted = await decryptEntryPayload(password, entry.enc);
       if (!decrypted) return false;
@@ -3760,6 +3879,7 @@ function renderReadOnlyCanvas(entry) {
   const canvas = el("readonly-canvas");
   canvas.innerHTML = "";
   canvas.classList.remove("password-gate"); // in case this is replacing the gate
+  canvas.classList.toggle("layout-phone", entry.layout === "phone");
   canvas.style.backgroundColor = entry.canvasBg || "";
   if (entry.canvasBgImage) {
     canvas.style.backgroundImage = `url("${entry.canvasBgImage}")`;

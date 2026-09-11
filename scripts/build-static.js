@@ -68,7 +68,7 @@ function mimeTypeFor(filePath) {
  * uploads/ folder is still copied verbatim so those photos exist on disk for
  * the page to show once unlocked.
  * @param {string} id
- * @returns {{id: string, title: string, date: number, itemCount: number, previewUrl: string|null, locked: boolean}}
+ * @returns {{id: string, title: string, date: number, itemCount: number, previewUrl: string|null, locked: boolean, layout: "laptop"|"phone"}}
  */
 function exportEntry(id) {
   const srcDir = path.join(ENTRIES_DIR, id);
@@ -132,6 +132,7 @@ function exportEntry(id) {
     itemCount: (entry.items || []).length,
     previewUrl,
     locked: !!entry.locked,
+    layout: entry.layout === "phone" ? "phone" : "laptop",
   };
 }
 

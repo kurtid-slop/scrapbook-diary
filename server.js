@@ -173,6 +173,7 @@ app.get("/api/entries", async (req, res) => {
           itemCount: (entry.items || []).length,
           previewUrl: preview ? (preview.type === "photo" ? preview.img : preview.img1) : null,
           locked: !!entry.locked,
+          layout: entry.layout === "phone" ? "phone" : "laptop",
         };
       })
     );
@@ -199,11 +200,12 @@ app.get("/api/entries/:id", async (req, res) => {
  * POST /api/entries
  * Create a new, empty entry: generates an id, creates its folder (and empty
  * uploads/ subfolder) on disk, writes entry.json, and returns the new entry.
- * Body: { title?: string }
+ * Body: { title?: string, layout?: "laptop"|"phone" }
  */
 app.post("/api/entries", async (req, res) => {
   const id = `entry-${Date.now()}-${uuidv4().slice(0, 8)}`;
-  const entry = { id, title: (req.body && req.body.title) || "New entry", date: Date.now(), items: [] };
+  const layout = req.body && req.body.layout === "phone" ? "phone" : "laptop";
+  const entry = { id, title: (req.body && req.body.title) || "New entry", date: Date.now(), items: [], layout };
   await fs.mkdir(entryUploadsDir(id), { recursive: true });
   await fs.writeFile(entryJsonPath(id), JSON.stringify(entry, null, 2));
   res.status(201).json(entry);

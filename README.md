@@ -32,7 +32,7 @@ Then open http://localhost:3000.
 |--------|-------------------|------|
 | GET    | `/api/entries`        | List all entries (summary: title, date, item count, preview photo) |
 | GET    | `/api/entries/:id`     | Full entry, including all items |
-| POST   | `/api/entries`         | Create a new entry |
+| POST   | `/api/entries`         | Create a new entry (optionally `{ layout: "laptop"\|"phone" }`) |
 | PUT    | `/api/entries/:id`     | Update an entry's title, date, or items |
 | DELETE | `/api/entries/:id`     | Delete an entry and its uploaded photos |
 | POST   | `/api/uploads`         | Upload a photo (multipart `photo` field), returns its URL |
@@ -65,6 +65,17 @@ no need to know about multi-selecting files), and Add — it becomes an item
 that flickers between them forever. Select it to get a delay slider on its
 bar, from 30ms up to 1 second, live-updating the speed as you drag. Works
 the same in the editor, the live preview, and the static export.
+
+## Laptop vs. smartphone entries
+
+**+ New entry** first asks which kind of page this is — **Laptop** (the
+original wide canvas, place things freely anywhere) or **Smartphone** (the
+same endless-vertical-scroll canvas, just narrowed and centered to read
+like a phone screen). It's a display-only choice made once at creation
+(`entry.layout`, in the entry's JSON) — every item's position is already
+stored as a percentage of the canvas's own width, so narrowing it needs no
+data conversion and works the same in the editor, the live preview, and the
+static export.
 
 ## Extending it
 

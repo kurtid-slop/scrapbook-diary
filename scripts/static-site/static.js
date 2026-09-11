@@ -657,6 +657,7 @@ function renderReadOnlyCanvas(entry) {
   const canvas = el("readonly-canvas");
   canvas.innerHTML = "";
   canvas.classList.remove("password-gate"); // in case this is replacing the gate
+  canvas.classList.toggle("layout-phone", entry.layout === "phone");
   canvas.style.backgroundColor = entry.canvasBg || "";
   if (entry.canvasBgImage) {
     canvas.style.backgroundImage = `url("${entry.canvasBgImage}")`;
@@ -715,6 +716,7 @@ async function initStaticEntryPage() {
   el("readonly-title").textContent = entry.title || "Untitled";
   el("readonly-date").textContent = formatDate(entry.date);
   if (entry.locked) {
+    el("readonly-canvas").classList.toggle("layout-phone", entry.layout === "phone");
     renderPasswordGate(el("readonly-canvas"), async (password) => {
       const decrypted = await decryptEntryPayload(password, entry.enc);
       if (!decrypted) return false;
@@ -774,9 +776,10 @@ async function initStaticListPage() {
 
     const meta = document.createElement("div");
     meta.className = "entry-card-meta diary-date";
-    meta.textContent = en.locked
+    const metaBase = en.locked
       ? `${formatDate(en.date)} · protected`
       : `${formatDate(en.date)} · ${en.itemCount} item${en.itemCount === 1 ? "" : "s"}`;
+    meta.textContent = en.layout === "phone" ? `${metaBase} · 📱` : metaBase;
 
     card.append(thumb, title, meta);
     grid.appendChild(card);
