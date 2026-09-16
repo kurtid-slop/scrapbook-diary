@@ -6,6 +6,16 @@
 <title>Scrapbook Diary</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Lora:ital,wght@0,400;0,500;1,400&family=Space+Mono:wght@400;700&display=swap" />
 <link rel="stylesheet" href="/styles.css" />
+<!-- @imgly/background-removal (loaded on demand — see loadBackgroundRemoval
+     in app.js) imports "onnxruntime-web" as a bare specifier, which only
+     resolves inside a bundler by default; this import map is what lets a
+     plain dynamic import() from a CDN URL resolve it too, straight from
+     another CDN. Needs to be present before that import() call fires (any
+     time before is fine — it isn't used until "Remove Background" is
+     actually clicked), not necessarily before this tag. -->
+<script type="importmap">
+{ "imports": { "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.bundle.min.mjs" } }
+</script>
 </head>
 <body>
 <div id="app">
@@ -35,6 +45,7 @@
       <button id="add-music-btn" class="btn btn-purple">+ Music</button>
       <button id="add-bangarang-btn" class="btn btn-teal" title="Loop two images, flickering between them">⚡ Bangarang</button>
       <button id="lock-btn" class="btn">🔓 Protect</button>
+      <button id="download-image-btn" class="btn" title="Save this entry as one big image">⬇️ Save Image</button>
       <button id="publish-btn" class="btn">Publish</button>
       <input id="photo-file-input" type="file" accept="image/*" hidden />
       <input id="canvas-bg-file-input" type="file" accept="image/*" hidden />
@@ -69,6 +80,7 @@
       <span class="readonly-badge">Preview</span>
       <h1 id="readonly-title" class="diary-title"></h1>
       <span id="readonly-date" class="diary-date"></span>
+      <button id="readonly-download-btn" class="btn" title="Save this entry as one big image">⬇️ Save Image</button>
     </div>
     <div id="readonly-error" class="empty-state" hidden>This entry couldn't be found.</div>
     <div id="readonly-canvas" class="scrapbook-canvas"></div>

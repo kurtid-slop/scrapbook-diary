@@ -238,7 +238,7 @@ function createReadOnlyPhotoCard(item) {
     return img;
   }
   const card = document.createElement("div");
-  card.className = "polaroid" + (item.shadow === false ? " no-shadow" : "");
+  card.className = (item.frame === "paper" ? "paper-frame" : "polaroid") + (item.shadow === false ? " no-shadow" : "");
   const caption = document.createElement("div");
   caption.className = "caption-input";
   caption.textContent = item.caption || "";
@@ -606,6 +606,79 @@ function createReadOnlyCard(item) {
   return createReadOnlyNoteCard(item);
 }
 
+// ---------- download entry as image ----------
+// "Save Image" rasterizes #readonly-canvas (already content-fit and
+// non-interactive, unlike the live editor's own canvas — see app.js's
+// downloadEntryAsImage for how that one differs) to a single PNG via
+// html2canvas, loaded from a CDN only when actually clicked.
+
+let html2canvasPromise = null; // memoized so the <script> tag is only ever injected once
+
+/** @returns {Promise<Function>} The global `html2canvas` function. */
+function loadHtml2Canvas() {
+  if (!html2canvasPromise) {
+    html2canvasPromise = new Promise((resolve, reject) => {
+      if (window.html2canvas) {
+        resolve(window.html2canvas);
+        return;
+      }
+      const tag = document.createElement("script");
+      tag.src = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
+      tag.onload = () => resolve(window.html2canvas);
+      tag.onerror = () => reject(new Error("Couldn't load the image exporter."));
+      document.head.appendChild(tag);
+    });
+  }
+  return html2canvasPromise;
+}
+
+/**
+ * @param {string} title
+ * @returns {string} `title`, cut down to something safe to use as a filename.
+ */
+function sanitizeFilename(title) {
+  return (title || "").trim().replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80) || "Untitled";
+}
+
+/**
+ * @param {string} dataUrl
+ * @param {string} filename
+ */
+function triggerImageDownload(dataUrl, filename) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/**
+ * @param {HTMLElement} canvasEl
+ * @param {string} title - Used for the downloaded filename.
+ * @param {HTMLButtonElement} btn - Disabled with progress text while working.
+ * @returns {Promise<void>}
+ */
+async function downloadReadOnlyAsImage(canvasEl, title, btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Rendering…";
+  try {
+    const html2canvas = await loadHtml2Canvas();
+    const rendered = await html2canvas(canvasEl, {
+      backgroundColor: getComputedStyle(canvasEl).backgroundColor || "#f3ebda",
+      scale: 2,
+      useCORS: true,
+    });
+    triggerImageDownload(rendered.toDataURL("image/png"), `${sanitizeFilename(title)}.png`);
+  } catch (err) {
+    alert("Couldn't create the image — try again.");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
 /**
  * @param {object} item - The bangarang-type item.
  * @returns {HTMLElement} A `.bangarang-frame` holding both images stacked
@@ -706,6 +779,9 @@ function renderReadOnlyCanvas(entry) {
  * @returns {Promise<void>}
  */
 async function initStaticEntryPage() {
+  el("readonly-download-btn").addEventListener("click", () => {
+    downloadReadOnlyAsImage(el("readonly-canvas"), el("readonly-title").textContent, el("readonly-download-btn"));
+  });
   const res = await fetch("./entry.json");
   if (!res.ok) {
     el("readonly-error").hidden = false;

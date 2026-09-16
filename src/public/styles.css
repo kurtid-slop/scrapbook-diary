@@ -3,7 +3,12 @@
 body {
   margin: 0;
   font-family: "Lora", serif;
-  background: #e9e2d0;
+  /* The page's own background — visible in the gutters on either side of a
+     narrow "phone"-layout entry's canvas (see .scrapbook-canvas.layout-phone),
+     behind the entries list grid, etc. Everything that actually needs the
+     cream/paper look (the canvas, toolbars, cards) sets its own background,
+     so this is independent of that. */
+  background: #000;
   color: #3a2c1a;
 }
 
@@ -288,11 +293,35 @@ body {
   border-radius: 3px;
 }
 
-.polaroid img {
+/* The "paper" frame option (see PHOTO_FRAME_OPTIONS/createPhotoFrameBar):
+   same square-photo-plus-caption shape as a polaroid, just clipped to a
+   torn/deckled edge instead of a plain rectangle. The jagged polygon below
+   was generated once (a fixed set of small random inward notches per edge,
+   corners left sharp) rather than hand-drawn — same shape on every one, at
+   whatever size the item is, since clip-path's points are percentages.
+   box-shadow can't be used here: clip-path cuts it off along with the box,
+   leaving broken-looking gaps in the shadow — filter: drop-shadow() traces
+   the actual (post-clip) silhouette instead, so it follows the torn edge
+   properly. */
+.paper-frame {
+  position: relative;
+  background: #fffdf6;
+  padding: 18px 18px 34px;
+  clip-path: polygon(
+    0% 0%, 16.67% 3.92%, 33.33% 4.33%, 50% 5.71%, 66.67% 3.97%, 83.33% 4.13%, 100% 0%,
+    95.57% 16.67%, 97.1% 33.33%, 95.85% 50%, 95.41% 66.67%, 94.79% 83.33%, 100% 100%,
+    83.33% 97.44%, 66.67% 96.65%, 50% 97.46%, 33.33% 94.72%, 16.67% 95.16%, 0% 100%,
+    2.36% 83.33%, 5.93% 66.67%, 5.87% 50%, 4.68% 33.33%, 4.54% 16.67%
+  );
+  filter: drop-shadow(0 6px 8px rgba(60, 45, 20, 0.35));
+}
+
+.polaroid img,
+.paper-frame img {
   width: 100%;
   /* Crops to a square purely visually (no pixel data touched), so a photo
-     dropped/pasted straight into a polaroid frame at its original aspect
-     ratio still reads as a classic square polaroid — see also the resize
+     dropped/pasted straight into a framed card at its original aspect
+     ratio still reads as a classic square print — see also the resize
      handle's aspect-lock for frame:"none" photos, which deliberately does
      NOT get this treatment. */
   aspect-ratio: 1 / 1;
@@ -311,6 +340,10 @@ body {
 .polaroid.no-shadow,
 .plain-photo-img.no-shadow {
   box-shadow: none;
+}
+
+.paper-frame.no-shadow {
+  filter: none;
 }
 
 /* A bangarang's two images stack directly on top of each other inside a
@@ -358,7 +391,8 @@ body {
   border-radius: 4px;
 }
 
-.polaroid .caption-input {
+.polaroid .caption-input,
+.paper-frame .caption-input {
   margin-top: 8px;
   width: 100%;
   border: none;
@@ -386,6 +420,17 @@ body {
   align-items: center;
   justify-content: space-between;
   margin: 0 0 12px;
+}
+
+/* A music item's stand-in for a still-image export (see createSnapshotCard)
+   — a playing embed can't be captured anyway, so this just marks where one
+   was rather than showing a blank or broken box. */
+.yt-snapshot-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  font-size: 40px;
 }
 
 .yt-pill {
@@ -805,6 +850,10 @@ body {
   line-height: 1;
 }
 
+/* Marks the currently-selected option among a row of these buttons (e.g.
+   the photo frame picker — see createPhotoFrameBar). */
+.note-bg-toggle-btn.active { background: rgba(255, 255, 255, 0.25); }
+
 .note-color-swatch {
   width: 16px;
   height: 16px;
@@ -995,6 +1044,18 @@ body {
   flex: 1 1 auto;
   accent-color: #c98a6b;
   cursor: pointer;
+}
+
+.crop-bg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 320px;
+}
+
+.crop-bg-status {
+  font-size: 12px;
+  color: #8a7a5c;
 }
 
 .crop-actions {

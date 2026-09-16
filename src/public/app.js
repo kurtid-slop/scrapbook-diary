@@ -953,6 +953,28 @@ async function convertHeicIfNeeded(file) {
   return new File([jpegBlob], `${baseName}.jpg`, { type: "image/jpeg" });
 }
 
+// ---------- background removal ----------
+// The crop modal's "Remove Background" button (see openCropModal) runs an
+// ML segmentation model entirely client-side — no server, no API key —
+// via @imgly/background-removal. It ships as an ES module only (no plain
+// <script src> global like heic2any), so this loads it with a dynamic
+// import() instead; a classic <script> can still do that. Its actual model
+// weights (tens of MB) are fetched separately, lazily, by the library
+// itself the first time removeBackground() runs, from imgly's own CDN.
+
+let backgroundRemovalPromise = null; // memoized so the module is only ever fetched once
+
+/**
+ * Lazily load @imgly/background-removal from a CDN.
+ * @returns {Promise<{removeBackground: Function}>}
+ */
+function loadBackgroundRemoval() {
+  if (!backgroundRemovalPromise) {
+    backgroundRemovalPromise = import("https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/dist/index.mjs");
+  }
+  return backgroundRemovalPromise;
+}
+
 // Where a photo picked via triggerPhotoPick() should be placed once the user
 // finishes the file-picker + crop-modal flow. Stashed here because the
 // browser's file input is a single shared, stateless element.
@@ -997,7 +1019,9 @@ el("photo-file-input").addEventListener("change", async (e) => {
  */
 async function uploadCroppedPhoto(blob, pos) {
   const form = new FormData();
-  form.append("photo", blob, "photo.jpg");
+  // A background-removed crop comes through as a PNG (see openCropModal) to
+  // keep its transparency — name it accordingly rather than always ".jpg".
+  form.append("photo", blob, blob.type === "image/png" ? "photo.png" : "photo.jpg");
   const res = await fetch(`/api/entries/${state.activeEntry.id}/uploads`, { method: "POST", body: form });
   if (!res.ok) return;
   const { url } = await res.json();
@@ -1350,7 +1374,12 @@ const CROP_OUTPUT_SIZE = 800; // pixel size of the final square photo we upload
  *   resulting photo item at once cropping finishes.
  */
 function openCropModal(file, pos) {
-  const objectUrl = URL.createObjectURL(file);
+  let objectUrl = URL.createObjectURL(file);
+  // Once a background removal succeeds, the working image has real
+  // transparency — every canvas re-encode from that point on (a rotation,
+  // and the final crop export) has to use PNG instead of JPEG, or the
+  // transparent areas would just get flattened to black.
+  let bgRemoved = false;
 
   const overlay = document.createElement("div");
   overlay.className = "crop-overlay";
@@ -1390,6 +1419,50 @@ function openCropModal(file, pos) {
   zoomSlider.value = "1";
   zoomRow.append(zoomIcon, zoomSlider);
 
+  const bgRow = document.createElement("div");
+  bgRow.className = "crop-bg-row";
+  const removeBgBtn = document.createElement("button");
+  removeBgBtn.type = "button";
+  removeBgBtn.className = "btn";
+  removeBgBtn.textContent = "🪄 Remove Background";
+  const bgStatus = document.createElement("span");
+  bgStatus.className = "crop-bg-status";
+  bgRow.append(removeBgBtn, bgStatus);
+
+  removeBgBtn.addEventListener("click", async () => {
+    removeBgBtn.disabled = true;
+    bgStatus.textContent = "Removing background… (first time can take a minute)";
+    try {
+      const { removeBackground } = await loadBackgroundRemoval();
+      // Pass the original File, not objectUrl — the library only skips its
+      // own URL resolution for an actual Blob/File; a string blob: URL
+      // fails its "is this absolute" check and gets wrongly resolved
+      // against the model's own CDN path instead of fetched directly. It
+      // always runs on the un-rotated original either way — whatever
+      // rotation is already dialed in gets re-baked on top of the result
+      // via sourceImg's "load" listener below, same as a fresh rotate click.
+      const resultBlob = await removeBackground(file, {
+        model: "small",
+        progress: (key, current, total) => {
+          if (total) bgStatus.textContent = `Removing background… ${Math.round((current / total) * 100)}%`;
+        },
+      });
+      const oldObjectUrl = objectUrl;
+      objectUrl = URL.createObjectURL(resultBlob);
+      bgRemoved = true;
+      // sourceImg's own "load" listener re-runs renderRotatedSource, which
+      // repoints `img` at the new (transparent) objectUrl — same path a
+      // rotate click takes, so pan/zoom naturally recenter for it too.
+      sourceImg.src = objectUrl;
+      URL.revokeObjectURL(oldObjectUrl);
+      removeBgBtn.textContent = "✓ Background removed";
+      bgStatus.textContent = "";
+    } catch (err) {
+      bgStatus.textContent = "Couldn't remove the background — try again.";
+      removeBgBtn.disabled = false;
+    }
+  });
+
   const actions = document.createElement("div");
   actions.className = "crop-actions";
   const cancelBtn = document.createElement("button");
@@ -1400,7 +1473,7 @@ function openCropModal(file, pos) {
   useBtn.textContent = "Use Photo";
   actions.append(cancelBtn, useBtn);
 
-  modal.append(heading, viewport, zoomRow, actions);
+  modal.append(heading, viewport, zoomRow, bgRow, actions);
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
 
@@ -1434,7 +1507,9 @@ function openCropModal(file, pos) {
     ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.rotate((rotationDeg * Math.PI) / 180);
     ctx.drawImage(sourceImg, -w / 2, -h / 2);
-    img.src = canvas.toDataURL("image/jpeg", 0.92);
+    // PNG once the background's been removed, or this bake-in-a-rotation
+    // step would flatten its transparency to black.
+    img.src = bgRemoved ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.92);
   }
 
   sourceImg.addEventListener("load", renderRotatedSource);
@@ -1530,13 +1605,15 @@ function openCropModal(file, pos) {
     canvas.height = CROP_OUTPUT_SIZE;
     const ctx = canvas.getContext("2d");
     ctx.drawImage(img, srcX, srcY, srcSize, srcSize, 0, 0, CROP_OUTPUT_SIZE, CROP_OUTPUT_SIZE);
+    // PNG (lossless, keeps the alpha channel) once the background's been
+    // removed — JPEG has no transparency, it would just flatten to black.
     canvas.toBlob(
       async (blob) => {
         if (blob) await uploadCroppedPhoto(blob, pos);
         cleanup();
       },
-      "image/jpeg",
-      0.9
+      bgRemoved ? "image/png" : "image/jpeg",
+      bgRemoved ? undefined : 0.9
     );
   });
 }
@@ -2874,12 +2951,22 @@ function createBangarangBar(item) {
   return bar;
 }
 
+// The three frame styles a photo can cycle through, in the order their
+// buttons appear on createPhotoFrameBar — item.frame itself stores the
+// second column's value (undefined for the default polaroid, since that's
+// how every photo predating this feature is already stored).
+const PHOTO_FRAME_OPTIONS = [
+  { frame: "none", icon: "🖼️", title: "Frameless" },
+  { frame: undefined, icon: "▭", title: "Polaroid" },
+  { frame: "paper", icon: "📜", title: "Torn paper border" },
+];
+
 /**
- * Build the frame-style toolbar shown when a photo is selected: a single
- * toggle button that switches between the default polaroid frame (with
- * caption) and a bare, frameless image. Flip/tape/shadow live in the
- * right-click menu instead (see renderItemContextMenu) — right-click-only,
- * not duplicated here.
+ * Build the frame-style toolbar shown when a photo is selected: three
+ * buttons for the frameless, polaroid, and torn-paper-border looks (see
+ * PHOTO_FRAME_OPTIONS), with the active one highlighted. Flip/tape/shadow
+ * live in the right-click menu instead (see renderItemContextMenu) —
+ * right-click-only, not duplicated here.
  * @param {object} item - The photo-type canvas item.
  * @returns {HTMLElement} The assembled toolbar element.
  */
@@ -2887,28 +2974,32 @@ function createPhotoFrameBar(item) {
   const bar = document.createElement("div");
   bar.className = "item-photo-frame-bar";
 
-  const toggleBtn = document.createElement("button");
-  toggleBtn.className = "note-bg-toggle-btn";
-  toggleBtn.textContent = item.frame === "none" ? "🖼️" : "▭";
-  toggleBtn.title = item.frame === "none" ? "Add polaroid frame" : "Remove frame";
-  toggleBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
-  toggleBtn.addEventListener("click", () => {
-    item.frame = item.frame === "none" ? undefined : "none";
-    // A prior resize's item.h means something different in each mode (a
-    // proportional scale when frameless vs. a deliberate stretch inside a
-    // polaroid — see startResize/updateItemWrap), so it doesn't carry
-    // across the toggle: drop it and let the new frame fall back to its
-    // own default (natural ratio frameless, or the polaroid's CSS-driven
-    // square crop) rather than displaying a stale, mismatched stretch.
-    item.h = undefined;
-    // Switching frames changes this item's DOM shape (polaroid-card vs
-    // bare <img>) enough that patching in place isn't worth it — drop its
-    // cached wrap so renderCanvas rebuilds just this one item from scratch.
-    forceRebuildItem(item.id);
-    renderCanvas();
-    scheduleSaveEntry();
-  });
-  bar.appendChild(toggleBtn);
+  for (const opt of PHOTO_FRAME_OPTIONS) {
+    const btn = document.createElement("button");
+    btn.className = "note-bg-toggle-btn" + (item.frame === opt.frame ? " active" : "");
+    btn.textContent = opt.icon;
+    btn.title = opt.title;
+    btn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    btn.addEventListener("click", () => {
+      if (item.frame === opt.frame) return;
+      item.frame = opt.frame;
+      // A prior resize's item.h means something different in each mode (a
+      // proportional scale when frameless vs. a deliberate stretch inside a
+      // framed card — see startResize/updateItemWrap), so it doesn't carry
+      // across the switch: drop it and let the new frame fall back to its
+      // own default (natural ratio frameless, or the CSS-driven square
+      // crop) rather than displaying a stale, mismatched stretch.
+      item.h = undefined;
+      // Switching frames changes this item's DOM shape (bare <img> vs. one
+      // of the two card styles) enough that patching in place isn't worth
+      // it — drop its cached wrap so renderCanvas rebuilds just this one
+      // item from scratch.
+      forceRebuildItem(item.id);
+      renderCanvas();
+      scheduleSaveEntry();
+    });
+    bar.appendChild(btn);
+  }
 
   return bar;
 }
@@ -2982,8 +3073,8 @@ function sanitizeHtml(html) {
  * — the caption's live value is kept in sync via its own input listener,
  * not by re-calling this.
  * @param {object} item - The photo-type canvas item.
- * @returns {HTMLElement} The `.polaroid` card element, or (frame "none")
- *   the bare `<img>` itself.
+ * @returns {HTMLElement} The `.polaroid`/`.paper-frame` card element, or
+ *   (frame "none") the bare `<img>` itself.
  */
 function createPhotoCard(item) {
   const img = document.createElement("img");
@@ -2993,14 +3084,17 @@ function createPhotoCard(item) {
   resizableElRefs.set(item.id, img);
 
   // "none" frame: the bare image is the whole card — no caption, no
-  // polaroid paper/shadow/padding, just the photo sitting on the page.
+  // card paper/shadow/padding, just the photo sitting on the page.
   if (item.frame === "none") {
     img.className = "plain-photo-img" + (item.shadow === false ? " no-shadow" : "");
     return img;
   }
 
   const card = document.createElement("div");
-  card.className = "polaroid" + (item.shadow === false ? " no-shadow" : "");
+  // "paper": same square-cropped-photo-plus-caption shape as the default
+  // polaroid, just clipped to a torn/deckled edge instead of a plain
+  // rectangle — see .paper-frame's clip-path.
+  card.className = (item.frame === "paper" ? "paper-frame" : "polaroid") + (item.shadow === false ? " no-shadow" : "");
   const caption = document.createElement("input");
   caption.className = "caption-input";
   caption.placeholder = "caption...";
@@ -3872,11 +3966,20 @@ async function initReadOnlyView(id) {
  * exactly as far down as the content goes. Unlike the editor's
  * growCanvasToFitContent, there's no endless-scroll buffer added here —
  * the published page's scroll distance is capped to its actual content.
+ * Also reused (with an offscreen `canvas` element) by downloadEntryAsImage
+ * to get this same tight, chrome-free layout for the editor's own "Save
+ * Image" button — its live #canvas is neither (endless-scroll buffer,
+ * selection handles), so exporting it directly wouldn't look right.
  * @param {object} entry - Full entry record (title, date, items, canvasBg) —
  *   already decrypted if it was protected (see initReadOnlyView).
+ * @param {HTMLElement} [canvas] - Defaults to #readonly-canvas.
+ * @param {(item: object) => HTMLElement} [cardBuilder] - Defaults to
+ *   createReadOnlyCard. downloadEntryAsImage passes createSnapshotCard
+ *   instead, so exporting a still image doesn't spin up a real YouTube
+ *   player or start a bangarang flickering, just to tear both back down
+ *   again the instant the image is captured.
  */
-function renderReadOnlyCanvas(entry) {
-  const canvas = el("readonly-canvas");
+function renderReadOnlyCanvas(entry, canvas = el("readonly-canvas"), cardBuilder = createReadOnlyCard) {
   canvas.innerHTML = "";
   canvas.classList.remove("password-gate"); // in case this is replacing the gate
   canvas.classList.toggle("layout-phone", entry.layout === "phone");
@@ -3911,7 +4014,7 @@ function renderReadOnlyCanvas(entry) {
       wrap.appendChild(washi);
     }
 
-    const card = createReadOnlyCard(item);
+    const card = cardBuilder(item);
     wrap.appendChild(card);
     canvas.appendChild(wrap);
 
@@ -3935,6 +4038,151 @@ function createReadOnlyCard(item) {
   if (item.type === "bangarang") return createReadOnlyBangarangCard(item);
   return createReadOnlyNoteCard(item);
 }
+
+/**
+ * Like createReadOnlyCard, but for a still-image export (see
+ * downloadEntryAsImage/downloadReadOnlyAsImage) rather than an actual page:
+ * a youtube item can't show a playing video in a still image, so this
+ * renders a plain note-colored placeholder instead of spinning up a real
+ * (iframed, cross-origin) YT.Player just to immediately tear it down again
+ * — html2canvas can't capture that iframe's content anyway. A bangarang
+ * shows only its first image, un-flickering, for the same reason: nothing
+ * about "currently showing image 1 of 2" makes sense in a static export.
+ * Everything else (photo/note/text) is identical to the real thing, so
+ * just reuses it.
+ * @param {object} item
+ * @returns {HTMLElement}
+ */
+function createSnapshotCard(item) {
+  if (item.type === "youtube") {
+    const card = document.createElement("div");
+    card.className = "yt-player-card yt-snapshot-card";
+    card.textContent = "🎵";
+    return card;
+  }
+  if (item.type === "bangarang") {
+    const img = document.createElement("img");
+    img.className = "plain-photo-img";
+    img.src = item.img1;
+    img.draggable = false;
+    if (item.h) {
+      img.style.height = `${item.h}px`;
+      img.style.objectFit = "cover";
+    }
+    return img;
+  }
+  return createReadOnlyCard(item);
+}
+
+// ---------- download entry as image ----------
+// "Save Image" (editor toolbar and both read-only toolbars) rasterizes the
+// entry's canvas to a single PNG via html2canvas, loaded from a CDN only
+// when actually clicked — most visits never need it.
+
+let html2canvasPromise = null; // memoized so the <script> tag is only ever injected once
+
+/** @returns {Promise<Function>} The global `html2canvas` function. */
+function loadHtml2Canvas() {
+  if (!html2canvasPromise) {
+    html2canvasPromise = new Promise((resolve, reject) => {
+      if (window.html2canvas) {
+        resolve(window.html2canvas);
+        return;
+      }
+      const tag = document.createElement("script");
+      tag.src = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
+      tag.onload = () => resolve(window.html2canvas);
+      tag.onerror = () => reject(new Error("Couldn't load the image exporter."));
+      document.head.appendChild(tag);
+    });
+  }
+  return html2canvasPromise;
+}
+
+/**
+ * @param {string} title
+ * @returns {string} `title`, cut down to something safe to use as a filename.
+ */
+function sanitizeFilename(title) {
+  return (title || "").trim().replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80) || "Untitled";
+}
+
+/**
+ * @param {string} dataUrl
+ * @param {string} filename
+ */
+function triggerImageDownload(dataUrl, filename) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/**
+ * Rasterize an already-rendered, content-fit read-only canvas element (the
+ * live app's or static export's #readonly-canvas — see
+ * downloadEntryAsImage for the editor's own version, which has neither) to
+ * a PNG and download it.
+ * @param {HTMLElement} canvasEl
+ * @param {string} title - Used for the downloaded filename.
+ * @param {HTMLButtonElement} btn - Disabled with progress text while working.
+ * @returns {Promise<void>}
+ */
+async function downloadReadOnlyAsImage(canvasEl, title, btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Rendering…";
+  try {
+    const html2canvas = await loadHtml2Canvas();
+    const rendered = await html2canvas(canvasEl, {
+      backgroundColor: getComputedStyle(canvasEl).backgroundColor || "#f3ebda",
+      scale: 2,
+      useCORS: true,
+    });
+    triggerImageDownload(rendered.toDataURL("image/png"), `${sanitizeFilename(title)}.png`);
+  } catch (err) {
+    alert("Couldn't create the image — try again.");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+/**
+ * The editor's "Save Image" button: the live, editable #canvas is neither
+ * content-fit (it keeps an endless-scroll buffer below the actual content —
+ * see growCanvasToFitContent) nor free of interactive chrome (selection
+ * handles/bars), so this builds the same tight, chrome-free layout the
+ * published view uses (renderReadOnlyCanvas) into an offscreen element
+ * instead of exporting #canvas directly, matching whatever width the entry
+ * is currently showing at (so a "phone"-layout entry exports narrow too).
+ * @returns {Promise<void>}
+ */
+async function downloadEntryAsImage() {
+  const entry = state.activeEntry;
+  if (!entry) return;
+  const btn = el("download-image-btn");
+  const offscreen = document.createElement("div");
+  offscreen.className = "scrapbook-canvas";
+  offscreen.style.position = "fixed";
+  offscreen.style.top = "0";
+  offscreen.style.left = "-99999px";
+  offscreen.style.width = `${el("canvas").getBoundingClientRect().width}px`;
+  document.body.appendChild(offscreen);
+  try {
+    renderReadOnlyCanvas(entry, offscreen, createSnapshotCard);
+    await downloadReadOnlyAsImage(offscreen, entry.title, btn);
+  } finally {
+    offscreen.remove();
+  }
+}
+
+el("download-image-btn").addEventListener("click", downloadEntryAsImage);
+el("readonly-download-btn").addEventListener("click", () => {
+  downloadReadOnlyAsImage(el("readonly-canvas"), el("readonly-title").textContent, el("readonly-download-btn"));
+});
 
 /**
  * @param {object} item - The bangarang-type item.
@@ -3997,7 +4245,7 @@ function createReadOnlyPhotoCard(item) {
   }
 
   const card = document.createElement("div");
-  card.className = "polaroid" + (item.shadow === false ? " no-shadow" : "");
+  card.className = (item.frame === "paper" ? "paper-frame" : "polaroid") + (item.shadow === false ? " no-shadow" : "");
   const caption = document.createElement("div");
   caption.className = "caption-input";
   caption.textContent = item.caption || "";

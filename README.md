@@ -77,6 +77,34 @@ stored as a percentage of the canvas's own width, so narrowing it needs no
 data conversion and works the same in the editor, the live preview, and the
 static export.
 
+## Photo frames and background removal
+
+When cropping a photo (the **+ Photo** flow), a **🪄 Remove Background**
+button cuts out the subject before you crop — entirely in your browser via
+a small ML model ([@imgly/background-removal](https://github.com/imgly/background-removal-js),
+loaded from a CDN only when you click it, so most uploads never pay for it).
+The first click downloads its model weights (tens of MB), which can take a
+minute; after that, the crop exports as a transparent PNG instead of a
+JPEG, so the cutout sits naturally on whatever frame you give it.
+
+Once a photo's on the canvas, select it for a 3-way frame picker on its
+bar: the classic polaroid, frameless, or a torn-paper border (a jagged
+`clip-path` edge, not an actual different crop) — try the torn border with
+a background-removed cutout for a real cut-and-pasted-onto-paper look.
+
+## Saving an entry as one image
+
+**⬇️ Save Image** — in the editor's toolbar, the live preview, and every
+published page — rasterizes the whole entry to a single big PNG and
+downloads it, via [html2canvas](https://html2canvas.hertzen.com/) (also
+loaded from a CDN only on click). The editor's own version renders an
+offscreen, read-only copy of the entry first rather than exporting its
+live canvas directly — that one keeps an endless-scroll buffer below the
+actual content and can have selection handles showing, neither of which
+belongs in the exported image. A music item can't show a video playing in
+a still image, so it exports as a plain "🎵" placeholder instead of trying
+to capture its (cross-origin, uncapturable anyway) embed.
+
 ## Extending it
 
 - `server.js` — all routes and file I/O
